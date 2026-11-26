@@ -9,3 +9,10 @@ build/
 
 # Rendered comparison material from quality tuning (regenerable, ~1 GB).
 outputs/
+.ruff_cache/
+
+# Local reference clone of NVIDIA's samples, not part of this project.
+nvidia-vfx-python-samples/
+
+# Per-user Claude Code settings.
+.claude/settings.local.json

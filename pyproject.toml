@@ -1,8 +1,9 @@
 [project]
-name = "rtx_modal_upscaler"
-description = "NVIDIA RTX media upscaler service for Modal.com using RTX Video Super Resolution."
+name = "rtx-vsr-modal"
+description = "Upscale images and video with NVIDIA RTX Video Super Resolution on Modal GPUs."
 version = "0.2.0"
-license = "LICENSE"
+license = "Apache-2.0"
+license-files = ["LICENSE", "NOTICE"]
 # Explicit so uv.lock always carries wheels for the local 3.13 venv; a Dependabot
 # relock without it dropped every cp313 wheel from the lock.
 requires-python = ">=3.13"
@@ -13,4 +14,4 @@ dependencies = [
 ]
 
 [project.urls]
-Repository = "https://github.com/tinof/modalcom"
+Repository = "https://github.com/tinof/rtx-vsr-modal"
