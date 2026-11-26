@@ -64,7 +64,7 @@ job. Check Modal's current prices before a large batch.
    ```bash
    git clone https://github.com/tinof/rtx-vsr-modal.git
    cd rtx-vsr-modal
-   uv sync                       # or: pip install -r requirements.txt
+   uv sync && source .venv/bin/activate    # or: pip install -r requirements.txt
    modal token new
    ```
 
@@ -91,7 +91,7 @@ job. Check Modal's current prices before a large batch.
    # 2x video with the default settings (HIGHBITRATE_ULTRA, HEVC Main 10, mp4)
    python modal_client.py --endpoint "$ENDPOINT" --input ./input.mkv --scale 2.0
 
-   # An image to exact dimensions
+   # An image, fitted inside 1920x1080 (add --no-keep-aspect-ratio to stretch to it)
    python modal_client.py --endpoint "$ENDPOINT" --input ./input.png \
        --resize-type "target dimensions" --width 1920 --height 1080 --quality HIGH
    ```
@@ -127,8 +127,8 @@ The first job in a fresh container also pays about 10 to 14 s of NGX initializat
 
 ## Choosing a quality mode
 
-NVIDIA's VSR SDK has 19 models in four families, all probed working on the RTX PRO 6000. They
-have two roles:
+The service accepts 17 of NVIDIA's VSR models, in four families, all probed working on the
+RTX PRO 6000. They have two roles:
 
 | Parameter | Accepted values | What it does |
 |---|---|---|
@@ -528,7 +528,7 @@ an error.
 
 | Symptom | Cause and fix |
 |---|---|
-| `NvVFX_Load failed … (code -12)` | The NGX library does not match the host driver. Set `DRIVER_VERSION` to the driver the error names and redeploy. It is not a GPU-model problem. |
+| `NvVFX_Load failed … (code -12)` | The NGX library does not match the host driver. The worker's startup line `WARNING: host NVIDIA driver is …` names the host driver; set `DRIVER_VERSION` to it and redeploy. It is not a GPU-model problem. |
 | The log says `Selected video encoder: libx264` | NVENC is unavailable: a GPU without NVENC, or an ffmpeg build that needs a newer driver. Output is correct but about ten times slower. |
 | `no kernel image is available for execution on the device` | torch is too old for the GPU. Blackwell needs `torch==2.13.0`. |
 | `401` from every endpoint | Missing or wrong `Modal-Key` / `Modal-Secret` headers. |
@@ -547,7 +547,8 @@ uv run --with pillow --with numpy python scripts/compare_frames.py \
     --original ./input.mkv --upscaled ./output.mp4
 ```
 
-For each frame it writes a full-frame comparison, a centre crop (where differences show at
+It needs a local `ffmpeg` and `ffprobe`, and its `FONT_PATH` points at a macOS font; change
+it on other systems. For each frame it writes a full-frame comparison, a centre crop (where differences show at
 screen zoom), and an amplified difference map. The original side is Lanczos-resized to the
 output size and labelled as such, so you compare against the best conventional resampler.
 
