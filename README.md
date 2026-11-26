@@ -195,8 +195,8 @@ absolute Laplacian; a plain `BICUBIC` upscale scores 1.01):
 | `HIGHBITRATE_ULTRA` + `DENOISE_MEDIUM` preprocess | 1.59 | 1.86 | 2.40 (no preprocess) |
 | `HIGHBITRATE_ULTRA` + `DEBLUR_ULTRA` preprocess | 3.48 | 2.52 | 2.40 (no preprocess) |
 
-These come from a single still; noise and flicker in motion were not measured. The default,
-1.0, applies the model's full effect.
+These come from a single still; noise and flicker in motion were not measured. At the default,
+1.0, no strength is passed to the SDK, so output matches a job that never set it.
 
 ## HDR10 output (TrueHDR)
 
@@ -242,8 +242,8 @@ python modal_client.py --endpoint "$ENDPOINT" --input ./input.mkv --scale 2.0 \
   14-18% slower (55-63 against 67-72 fps). `debanding=off` cut TrueHDR from 0.31 to 0.14 ms
   per frame at 1080p.
 - Rejected with `400`: image inputs, sources that are already HDR (PQ or HLG), and outputs
-  above 8192x4320. If the GPU encoder path is unavailable the job fails rather than write
-  SDR without a warning.
+  above 8192x4320. If the GPU encoder path is unavailable the job fails before any GPU
+  work instead of writing SDR.
 
 ## Output format
 
