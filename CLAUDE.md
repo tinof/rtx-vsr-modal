@@ -708,7 +708,7 @@ arguments and nothing else. The app imported cleanly for the entire period when 
     - The same job with `container=mp4` still passes steps 4-6.
     Short clips are enough: the mux does not depend on the length.
 
-**The lasting lesson of the striping bug is verification, not encoders:** for a full day
+**What the striping bug teaches is to inspect pixels:** for a full day
 that path produced visibly broken 4K while passing frame count, `ffprobe`, a clean decode
 with zero errors, and `_check_frame_integrity`. Only looking at pixels caught it, hence
 step 6.
