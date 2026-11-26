@@ -48,13 +48,14 @@ Working on the code with an AI agent? Point it at [CLAUDE.md](CLAUDE.md) (also l
 - A Modal proxy auth token pair. The endpoint requires one, because every request spends GPU
   money.
 
-**Cost.** At the default settings the single-encoder path takes roughly 42 minutes of GPU time
-per hour of 25 fps video (1080p to 4K), about $2.40 at Modal's 2026-10 RTX PRO 6000 rate.
-Inputs of 30 s or more use four encoders in parallel and need about half the GPU time per
-frame. Modal bills while a container is up, and a worker stays warm for 120 s after its last
-job. Check Modal's current prices before a large batch.
+At the default settings a clip under 30 s, encoded by one NVENC session, takes roughly 42
+minutes of GPU time per hour of 25 fps video (1080p to 4K), about $2.40 at Modal's 2026-10
+RTX PRO 6000 rate. Inputs of 30 s or more use four encoders in parallel: that takes about
+half the GPU time per frame on long inputs and two thirds on a 61-second clip. Modal bills
+while a container is up, and a worker stays warm for 120 s after its last job. Check
+Modal's current prices before a large batch.
 
-**Output size.** At the default quality target (CQ 20), grainy 4K lands roughly between 35 and
+At the default quality target (CQ 20), grainy 4K lands roughly between 35 and
 80 Mbps. A 61-second 1080p Blu-ray sample came out at 78 Mbps, about 35 GB per hour.
 
 ## Quick start
@@ -147,13 +148,13 @@ and leaves a blotchy, painterly look. On the reference clip, mode 19 (`HIGHBITRA
 beat mode 4 (`ULTRA`) on both axes: about 15% more edge detail and roughly 8x less
 flat-region noise. Use `ULTRA` for heavily compressed, blocky encodes.
 
-**Check what the source really holds before judging the output.** A "1080p" broadcast file is
+Check what the source really holds before judging the output. A "1080p" broadcast file is
 often an SD master that someone already upscaled. Downscale a frame to 540p and back up. If
 that reproduces the file almost exactly (mean absolute difference below 1/255), there is no
 real detail for VSR to recover, and the output will look close to a Lanczos resize at any
 setting.
 
-**Preprocess costs a second inference pass per frame**, so use it only when the source is the
+Preprocess costs a second inference pass per frame, so use it only when the source is the
 limiting factor. Measured on a soft, already-upscaled SD master, all with `HIGHBITRATE_ULTRA`:
 
 | Preprocess | Edge detail | Flat-region noise | Temporal flicker |
@@ -166,10 +167,10 @@ limiting factor. Measured on a soft, already-upscaled SD master, all with `HIGHB
 
 Two results contradict the mode names:
 
-- **Deblur intensity is not monotonic.** `DEBLUR_LOW` and `DEBLUR_MEDIUM` give more apparent
+- Deblur intensity is not monotonic. `DEBLUR_LOW` and `DEBLUR_MEDIUM` give more apparent
   detail than `DEBLUR_HIGH` and `DEBLUR_ULTRA`. The upper rungs seem to regularise more
   alongside the sharpening.
-- **Judge deblur in motion.** Flat-region noise that changes from frame to frame is what looks
+- Judge deblur in motion. Flat-region noise that changes from frame to frame is what looks
   bad on screen. `DEBLUR_ULTRA` adds about 50% detail for 5% more flicker. `DEBLUR_LOW` looks
   best on a still and flickers the most.
 
@@ -181,7 +182,9 @@ python modal_client.py --endpoint "$ENDPOINT" --input ./soft_source.mkv \
     --scale 2.0 --quality HIGHBITRATE_ULTRA --preprocess DEBLUR_ULTRA
 ```
 
-**Effect strength.** `strength` scales the upscale model's effect and `preprocess_strength`
+### Effect strength
+
+`strength` scales the upscale model's effect and `preprocess_strength`
 the preprocess pass, in every family. Detail on one 1080p web-encode still at 2x (mean
 absolute Laplacian; a plain `BICUBIC` upscale scores 1.01):
 
@@ -192,8 +195,8 @@ absolute Laplacian; a plain `BICUBIC` upscale scores 1.01):
 | `HIGHBITRATE_ULTRA` + `DENOISE_MEDIUM` preprocess | 1.59 | 1.86 | 2.40 (no preprocess) |
 | `HIGHBITRATE_ULTRA` + `DEBLUR_ULTRA` preprocess | 3.48 | 2.52 | 2.40 (no preprocess) |
 
-These come from a single still; noise and flicker in motion were not measured. At 1.0 the SDK
-call is unchanged from before the option existed.
+These come from a single still; noise and flicker in motion were not measured. The default,
+1.0, applies the model's full effect.
 
 ## HDR10 output (TrueHDR)
 
@@ -219,36 +222,38 @@ python modal_client.py --endpoint "$ENDPOINT" --input ./input.mkv --scale 2.0 \
     --truehdr "contrast=102,saturation=102,middlegray=46,maxluminance=680"
 ```
 
-- **Order: VSR first, then TrueHDR**, as in NVEncC, whatever the command-line order. In a
+- Order: VSR first, then TrueHDR, as in NVEncC, whatever the command-line order. In a
   probe, running VSR on PQ data instead made bright edges overshoot from about 650 to about
   3200 nits.
-- **No crop or pad.** The output keeps the source aspect. Black stays at 0 nits, so bars
+- No crop or pad. The output keeps the source aspect. Black stays at 0 nits, so bars
   inside the source stay black.
-- **The default primaries are BT.2020**, as in the reference StaxRip command
+- The default primaries are BT.2020, as in the reference StaxRip command
   (G 0.170/0.797, R 0.708/0.292). Discs usually signal P3-D65,
   `G(13250,34500)B(7500,3000)R(34000,16000)WP(15635,16450)L(…)`; pass that if you prefer it.
-- **MaxCLL and MaxFALL are measured per job.** Without `max_cll`, the worker measures the
+- MaxCLL and MaxFALL are measured per job. Without `max_cll`, the worker measures the
   brightest pixel and the brightest frame average of the encoded frames and writes those
   values (rounded up) into every keyframe. An explicit `max_cll="a,b"` is written as given.
   The 300 nits of the StaxRip command overstate MaxFALL on dark drama, where test clips
   measured 30-52 nits. Letterbox bars count in the frame average, so MaxFALL reads slightly
   low on letterboxed sources (about 1.33x low for 2.39:1 in a 16:9 frame). The worker log
   prints the values: `HDR10 light levels: measured … ; written … (measured)`.
-- **Speed.** TrueHDR adds about 1 ms of GPU work per 4K frame and the BT.2020 conversion about
+- TrueHDR adds about 1 ms of GPU work per 4K frame and the BT.2020 conversion about
   1.2 ms. Short inputs run at SDR speed. On the four-encoder path the encode phase measured
   14-18% slower (55-63 against 67-72 fps). `debanding=off` cut TrueHDR from 0.31 to 0.14 ms
   per frame at 1080p.
-- **Rejected with `400`:** image inputs, sources that are already HDR (PQ or HLG), and outputs
-  above 8192x4320. If the GPU encoder path is unavailable the job fails instead of quietly
-  writing SDR.
+- Rejected with `400`: image inputs, sources that are already HDR (PQ or HLG), and outputs
+  above 8192x4320. If the GPU encoder path is unavailable the job fails rather than write
+  SDR without a warning.
 
 ## Output format
 
-**Video** is HEVC Main 10 (`yuv420p10le`, Level 5.1, High tier), tagged bt709 for matrix,
+Video is HEVC Main 10 (`yuv420p10le`, Level 5.1, High tier), tagged bt709 for matrix,
 primaries and transfer, or HDR10 with `truehdr`. 10-bit is used even for 8-bit sources: it
-costs nothing on NVENC and keeps upscaled gradients from banding.
+costs nothing on NVENC and keeps upscaled gradients from banding. Images come back as PNG.
 
-**Container.** mp4 is the default. Every source audio track is kept. A track is stream-copied
+### Container
+
+mp4 is the default. Every source audio track is kept. A track is stream-copied
 when mp4 can carry its codec (AAC, AC-3, E-AC-3, Opus, ALAC, MP3, FLAC); any other codec (DTS,
 TrueHD, PCM, ...) is re-encoded to AAC 192k for that track only, with a warning in the worker
 log. mp4 output drops subtitles.
@@ -259,18 +264,20 @@ SRT. The MKV track header repeats the colour signalling and, for HDR10, the mast
 and MaxCLL/MaxFALL, because players that read colour from the container would otherwise see
 an untagged stream. A source mkvmerge cannot read is rejected with `400` before any GPU work.
 
-**10-bit SDR sources** (for example `yuv420p10le` HEVC) are decoded as packed 10-bit RGB, and
+### 10-bit sources
+
+10-bit SDR sources (for example `yuv420p10le` HEVC) are decoded as packed 10-bit RGB, and
 VSR and any preprocess pass run in the SDK's 10-bit mode, so the extra precision reaches the
 model. 8-bit sources are unaffected.
 
-**Interlace-flagged sources.** Many UK and EU HD discs carry progressive 25p pictures in a
+### Interlace-flagged sources
+
+Many UK and EU HD discs carry progressive 25p pictures in a
 1080i container (PsF). The in-process GPU decoder deinterlaces any interlace-flagged stream,
 and on such a disc it removed 32% of vertical detail before VSR saw the frame. The worker
 therefore decodes these inputs through ffmpeg's NVDEC path, which weaves the fields
 losslessly, and logs a warning saying so. Truly interlaced 50i/60i video would need a real
 deinterlacer, which is not included.
-
-**Images** come back as PNG.
 
 ### Encoder settings
 
@@ -289,7 +296,7 @@ frames (a BBC Blu-ray, 1080p to 4K). As an NVEncC command line:
 | CQ | `20` | A file-size choice. CQ 18 measured about 80 Mbps (VMAF 94.3), CQ 24 about 35 Mbps (VMAF 91.3). |
 | Level / ceiling | `5.1` High, 100 Mbps | Above 4096x2176 the driver picks the level. |
 
-**Why the bitrate ceiling is set explicitly.** PyNvVideoCodec zeroes NVENC's `maxBitRate`
+The worker sets the bitrate ceiling itself. PyNvVideoCodec zeroes NVENC's `maxBitRate`
 whenever a CQ target is set, and the driver then applies its own VBR ceiling: about 20 Mbps at
 Level 5.0, 32 Mbps at 5.1, 48 Mbps at 6.0. Grainy 4K hit that ceiling, so CQ 18 and CQ 24 gave
 the same file size. With the level unset the driver also picked it per session, so the same
@@ -507,19 +514,19 @@ an error.
 
 ## Limits and guarantees
 
-- **Upscaling only.** `scale` must be at least 1.0, and a target smaller than the input is
+- Upscaling only. `scale` must be at least 1.0, and a target smaller than the input is
   rejected with `400`.
-- **Output dimensions** are rounded to multiples of 8 (minimum 8). In `target dimensions`
+- Output dimensions are rounded to multiples of 8 (minimum 8). In `target dimensions`
   mode the output fits inside the box unless you pass `--no-keep-aspect-ratio`.
-- **Maximum output edge: 16384 pixels.** Larger requests are rejected with `400` before any
+- Maximum output edge: 16384 pixels. Larger requests are rejected with `400` before any
   GPU work. The SDK corrupts output at 16K (the blue channel collapses to 0), so between 15360
   and 16384 the worker runs VSR at 15360 and resamples the rest of the way with GPU bicubic
   interpolation.
-- **Every frame is checked on the GPU** for non-finite values and channel collapse, so corrupt
+- Every frame is checked on the GPU for non-finite values and channel collapse, so corrupt
   SDK output fails the job instead of reaching your file.
-- **Fallbacks are never silent.** If the GPU decoder or encoder cannot be used, the worker
+- Fallbacks are never silent. If the GPU decoder or encoder cannot be used, the worker
   falls back and logs a warning that names the cause.
-- **One job per worker container.** Modal scales out with more containers instead.
+- One job per worker container. Modal scales out with more containers instead.
 - Resize types, the quality mapping, the multiple-of-8 alignment and the
   `MAX_PIXELS = 1024 * 1024 * 16` batching heuristic come from the ComfyUI node this project
   started as. They are part of the API contract.
@@ -554,20 +561,20 @@ output size and labelled as such, so you compare against the best conventional r
 
 If you benchmark settings or GPUs:
 
-1. **Compare warm containers only.** The same configuration measured 8.0 fps cold and 12 fps
+1. Compare warm containers only. The same configuration measured 8.0 fps cold and 12 fps
    warm on a 12-second clip. Run the clip three or four times in one container and read the
    later runs.
-2. **Deploy the variant beside the main app** with its own `MODAL_APP_NAME`, and set
+2. Deploy the variant beside the main app with its own `MODAL_APP_NAME`, and set
    `MODAL_WORKER_MAX_CONTAINERS=1` so the autoscaler does not spread the runs over
    containers.
-3. **Use real content.** On synthetic noise the `cq` response measured inverted.
-4. **Check pixels, not only metadata.** For a full day this pipeline produced visibly striped
+3. Use real content. On synthetic noise the `cq` response measured inverted.
+4. Check pixels, not only metadata. For a full day this pipeline produced visibly striped
    4K that passed frame count, `ffprobe`, a clean decode and the built-in integrity check. Two
    cheap checks catch it: count frames whose standard deviation is above 1 (fewer than the
    frame count means flat grey frames), and take the mean absolute Laplacian of a 512-pixel
    crop (about 1 to 3 on the reference clip; about 190 means column striping).
    `scripts/probe_p010_encode.py` runs both on a synthetic clip.
-5. **Compute cost per frame**, from Modal's current per-second price for the GPU plus the CPU
+5. Compute cost per frame, from Modal's current per-second price for the GPU plus the CPU
    and memory you requested.
 
 The full verification protocol for code changes is in [CLAUDE.md](CLAUDE.md).

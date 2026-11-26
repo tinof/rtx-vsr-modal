@@ -110,7 +110,7 @@ Historical table (piped path, 302-frame clip, 1080p→4K, `HIGHBITRATE_ULTRA`, w
   content. That is exactly why the consumer driver overlay is realtime: it does
   decode→VSR→*screen*, fully GPU-resident, with no encode and no host round-trips. We
   additionally write an archival 4K 10-bit HEVC file, which alone is a ~19.5 fps job.
-- **Neither is the encoder's compute, which is the counter-intuitive part.** Standalone the
+- **Neither is the encoder's compute.** Standalone the
   NVENC preset is a huge lever (p6 21 fps, p5 31, p4 38.5, p4+qres 43; `-multipass`, AQ
   and `-rc-lookahead` are all minor by comparison). **In situ every one of them measures
   12.0-12.6 fps, no change at all.** p4+`-multipass qres` is 2.05x faster standalone and
@@ -215,7 +215,7 @@ CUDA memory and never leaves it until NVENC emits a packet. Warm on the referenc
 |---|---|---|
 | piped decode + piped encode (original) | 12.1 | 296 of 301 |
 | piped decode + GPU encode | 34.2 | 302 (over-counted) |
-| **in-process NVDEC + GPU encode (current)** | **57–60** | **301 of 301** |
+| **in-process NVDEC + GPU encode (current)** | **57-60** | **301 of 301** |
 
 301 is the correct count: `ffprobe -count_frames` on the source says 301, so the piped
 path's "302" was over-counting by one.
