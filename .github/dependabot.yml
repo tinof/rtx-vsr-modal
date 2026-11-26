@@ -1,0 +1,15 @@
+version: 2
+updates:
+  # Covers the local client only. Container dependencies are pinned in
+  # modal_app.py and need a GPU round-trip before they change.
+  - package-ecosystem: uv
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      uv:
+        patterns: ["*"]
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly

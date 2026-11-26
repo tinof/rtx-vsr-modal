@@ -1,8 +1,8 @@
-# CLAUDE.md — RTX Media Upscaler on Modal
+# CLAUDE.md: RTX Media Upscaler on Modal
 
 Conventions, constraints, and the traps that have already cost real debugging time. Setup
 and API docs are in [README.md](README.md). The measured history behind the performance
-conclusions here is in [docs/PERF-HISTORY.md](docs/PERF-HISTORY.md) — read it before
+conclusions here is in [docs/PERF-HISTORY.md](docs/PERF-HISTORY.md). Read it before
 re-running any benchmark.
 
 ## What this project is
@@ -14,7 +14,7 @@ It began as a port of the Comfy-Org ComfyUI custom node ([NOTICE](NOTICE) has th
 Apache-2.0 attribution) and keeps that node's resize-type handling, quality mapping,
 dimension alignment (multiples of 8), and `MAX_PIXELS = 1024 * 1024 * 16` batching
 heuristic. Those behaviours are now this service's **contract**, not a parity target.
-Changing one is a breaking API change — say so explicitly rather than "improving" it in
+Changing one is a breaking API change: say so explicitly rather than "improving" it in
 passing.
 
 **This project is also the template for other Modal jobs.** The next section marks which
@@ -38,7 +38,7 @@ Each one fixes a concrete problem.
   so a `/result` `reload()` fails ("volume busy") or drops another input's uncommitted
   upload. Only the GPU worker mounts it, and only the worker calls `reload()`/`commit()`.
 - **Warm expensive state in `@modal.enter()`.** CUDA init, model load, and encoder probing
-  belong there — once per container, not once per request.
+  belong there, once per container, not once per request.
 - **`requires_proxy_auth=True` on any endpoint that spends GPU money.** Modal web
   functions are public by default.
 - **Let Modal handle concurrency.** Without `@modal.concurrent`, Modal sends one input per
@@ -50,7 +50,7 @@ Each one fixes a concrete problem.
   images cross a process boundary between GPU stages, that copy is very likely your
   ceiling.
 
-## Hard constraints — do not change casually
+## Hard constraints: do not change casually
 
 Each was discovered the expensive way. All are pinned in `modal_app.py`.
 
@@ -67,7 +67,7 @@ NvVFX_Load failed: The effect has not been properly initialized (code -12)
 The image installs that one library from the matching NVIDIA driver `.run` package.
 `DRIVER_VERSION` must track the host driver from `nvidia-smi`; `_warn_on_driver_mismatch()`
 logs a warning at container start when they diverge. If VSR breaks after a Modal driver
-upgrade, check this first. The failure is *not* GPU-model-specific — do not go GPU
+upgrade, check this first. The failure is *not* GPU-model-specific, so do not go GPU
 shopping when you see `-12`.
 
 State on 2026-11-25: the image pins 580.95.05, and every container that day ran on a
@@ -83,15 +83,15 @@ version:
 | Build | SDK | Requires driver | Works on Modal (580.95.05) |
 |---|---|---|---|
 | BtbN `master-latest` | 13.1.15 | 610.0+ | **No** |
-| BtbN `n8.1` (pinned) | — | 570.0+ | Yes, incl. `av1_nvenc` |
-| Debian apt ffmpeg 5.1 | — | — | Yes, no `av1_nvenc` |
+| BtbN `n8.1` (pinned) | | 570.0+ | Yes, incl. `av1_nvenc` |
+| Debian apt ffmpeg 5.1 | | | Yes, no `av1_nvenc` |
 
 The last column was measured on 580 hosts. 610.57.04 and 620.70.06 hosts (2026-11-25) meet
 `master-latest`'s requirement, but the fleet is mixed and it has not been re-tested.
 
 Pointing `FFMPEG_URL` at `master-latest` makes every NVENC encoder fail to initialize and
-the worker falls back to CPU `libx264` — correct output, roughly an order of magnitude
-slower. Pin versioned URLs, never `latest`/`master` — and note that BtbN's
+the worker falls back to CPU `libx264`: correct output, roughly an order of magnitude
+slower. Pin versioned URLs, never `latest`/`master`, and note that BtbN's
 `latest` *tag* is rebuilt daily even for the `n8.1-latest` asset. `FFMPEG_URL` points at a
 **month-end** `autobuild-YYYY-MM-DD-*` release (BtbN prunes the daily tags but keeps
 month-end ones) and `FFMPEG_SHA256` makes the image build fail on any artifact change. To
@@ -103,7 +103,7 @@ protocol.
 
 Default is `RTX-PRO-6000` (Blackwell): verified working, and the only Modal GPU with
 9th-gen NVENC. B200/B300 and A100 have **no NVENC engine at all**. Blackwell is `sm_120`,
-so `torch==2.13.0` is required — torch 2.6 fails with "no kernel image is available for
+so `torch==2.13.0` is required; torch 2.6 fails with "no kernel image is available for
 execution on the device". Upgrading the GPU forces upgrading torch.
 
 ### 4. VSR 15360px limit, DLPack buffer clone, and output integrity
@@ -111,7 +111,7 @@ execution on the device". Upgrading the GPU forces upgrading torch.
 - **SDK defect at 16K output**, probed on Linux + Blackwell RTX-PRO-6000. At
   **15360x15360** input means `[0.5, 0.5, 0.5]` give output means
   `[0.4998, 0.5007, 0.5012]` (clean). At **16384x16384** the same input gives
-  `[0.4998, 0.5007, 0.0]` — the blue channel collapses to 0.
+  `[0.4998, 0.5007, 0.0]`: the blue channel collapses to 0.
 - **Hybrid resize path.** When requested output falls between 15360 and 16384, the worker
   runs VSR capped at 15360 and resamples to target with GPU
   `torch.nn.functional.interpolate(mode="bicubic")` in float, before uint8 conversion.
@@ -130,11 +130,11 @@ on `RTX-PRO-6000` / driver 580.95.05. nvidia-vfx 0.2.0.0 adds `STREAMING_MEDIUM`
 `STREAMING_ULTRA` (23); they are not in `UPSCALE_QUALITIES` and are rejected until
 someone probes and decides on them.
 
-- `BICUBIC, LOW..ULTRA` (0-4) and `HIGHBITRATE_LOW..ULTRA` (16-19) **change resolution** —
+- `BICUBIC, LOW..ULTRA` (0-4) and `HIGHBITRATE_LOW..ULTRA` (16-19) **change resolution**, so they are
   valid for `quality`. The standard family also suppresses compression artifacts, so it
   softens clean sources; `HIGHBITRATE_*` skips that for ProRes-grade input.
 - `DENOISE_LOW..ULTRA` (8-11) and `DEBLUR_LOW..ULTRA` (12-15) are **same-resolution**
-  restoration — valid only for `preprocess`, which runs a second pass at input size before
+  restoration, valid only for `preprocess`, which runs a second pass at input size before
   upscaling.
 
 `UPSCALE_QUALITIES` / `SAME_RES_QUALITIES` encode this split and the web tier rejects a
@@ -144,9 +144,9 @@ slim CPU image where the SDK is not installed.
 
 The preprocess pass gets its own cached effect instance (`role="preprocess"` in
 `_super_res`), so the two models coexist without evicting each other. Its output needs the
-same mandatory `.clone()` — same reused-buffer trap as section 4.
+same mandatory `.clone()`: the same reused-buffer trap as section 4.
 
-**The default is `HIGHBITRATE_ULTRA` (19), not `ULTRA` (4)** — set in the `quality` Form
+**The default is `HIGHBITRATE_ULTRA` (19), not `ULTRA` (4)**, set in the `quality` Form
 default. "High bitrate" means *few compression artifacts*, not *high resolution*.
 Broadcast archive material is typically soft but cleanly encoded, so the standard family's
 artifact suppression has nothing real to remove and instead damages texture, producing a
@@ -334,7 +334,7 @@ deploy.
 | `probe_gpu_pipeline.py` | Re-testing the NVDEC decoder and rate control on real content. |
 | `probe_nvdec.py` | Re-testing decoder classes after a PyNvVideoCodec upgrade (is `ThreadedDecoder` fixed yet?). |
 | `probe_nvdec_rgb.py` | Re-testing the NVDEC `OutputColorType.RGB` path and its surface layout. |
-| `probe_p010_encode.py` | Any suspicion of corrupt GPU-encoder output — striping, stale or flat frames. |
+| `probe_p010_encode.py` | Any suspicion of corrupt GPU-encoder output: striping, stale or flat frames. |
 | `verify_roundtrip.py` | Running the deployed worker on a Volume-staged job, warm, without proxy tokens. Flags for quality, preprocess, scale, `--truehdr`, `--container` and the strengths. `MODAL_APP_NAME` selects a bench deploy. |
 | `probe_nvdec_interlace.py` | Re-testing whether in-process NVDEC still deinterlaces interlace-flagged PsF input (row-parity diff against ffmpeg's woven decode). |
 | `probe_stages.py` | Per-stage timing: VSR alone, encode alone per preset, serial vs overlapped, N concurrent NVENC sessions. One encoder per single-use container. |
@@ -344,7 +344,7 @@ deploy.
 
 The probes are standalone by design (own image, no `import modal_app`) and cost a few
 minutes of GPU each. Re-run them rather than reasoning about SDK behavior from
-documentation — every video-path finding came from a probe contradicting the docs.
+documentation; every video-path finding came from a probe contradicting the docs.
 
 ## Modal conventions used here
 
@@ -402,7 +402,7 @@ Manager Blu-ray sample.
 - **PyNvVideoCodec silently drops unknown kwargs** into a `map<string,string>` with no
   validation, so a typo costs quality and raises nothing. The quality key is **`cq`**
   (NVENC `targetQuality`), not `qp`. Tuning values are **`uhq`** and **`high_quality`**
-  (not `ultra_high_quality` / `hq`) — anything else falls through to UNDEFINED and surfaces
+  (not `ultra_high_quality` / `hq`); anything else falls through to UNDEFINED and surfaces
   as error 8. `temporalaq` enables on *any* non-empty string, even `"0"`; `""` leaves it
   unset. `numrefl0/1` force reference-list sizes (NVEncC `--multiref-l0/l1`), not
   NVEncC's `--ref` (DPB size); the GPU path leaves them to the driver.
@@ -417,7 +417,7 @@ Manager Blu-ray sample.
   (100 Mbit, a 1 s buffer).
 - **Keep the VBV buffer at 1 s.** With 1.6x the ceiling (160 Mbit), an encoder created at a
   different resolution than the previous job in the same warm container failed
-  `nvEncInitializeEncoder` with error 8 — 4K after 8K and 8K after 4K, reproducible —
+  `nvEncInitializeEncoder` with error 8 (4K after 8K and 8K after 4K, reproducible),
   while each size passed on a fresh container. Bisected: removing the explicit level, the
   ceiling or P5+fullres each hid it; the 1 s buffer fixed it for 4K, 1620p and 8K in both
   orders. Any change to the level, ceiling or buffer must re-run a mixed-size sequence in
@@ -432,21 +432,21 @@ Manager Blu-ray sample.
   explicit level retries once without it, with a WARNING (`rejected explicit HEVC level`).
   In 16 mixed jobs the fallback fired 4 times; those 4K outputs carried level 5.0 or 6.0
   instead of 5.1, with the same 100 Mbps ceiling and file size. **Test image→video and
-  size switches before deploying any encoder change** — the bench runs that preceded the
+  size switches before deploying any encoder change**: the bench runs that preceded the
   failed deploy were all video-first.
 - **Always set the HEVC level.** With `level` unset the driver chose 5.0 or 6.0 per
-  session for identical input, each with a different default ceiling — the "same job, 2.4x
+  session for identical input, each with a different default ceiling: the "same job, 2.4x
   bigger file" bug. `MODAL_NVENC_LEVEL` defaults to 5.1 and applies to outputs up to
   4096x2176; above that `_hevc_level()` leaves the level to the driver (it picked 6.0 or
   6.2 at 8K; with the ceiling restored the size stays identical).
 - **Patch `torch.Tensor.__dlpack__`, do not wrap the tensor in a shim.** PyNvVideoCodec
   calls `__dlpack__(stream)` positionally and torch 2.13 wants it keyword. A shim object
   makes the encoder decide it has a CPU buffer ("incorrect usage of CPU input buffer").
-- **`MAX_BATCH = 1`.** batch=1 measured 56.0 fps against batch=2's 53.2 — a larger batch
+- **`MAX_BATCH = 1`.** batch=1 measured 56.0 fps against batch=2's 53.2. A larger batch
   makes the encoder wait on a longer run of inference instead of overlapping with it. The
   constant also pins the batch for a correctness reason (the cross-stream DLPack race), so
   do not raise it for speed or memory without reading the post-mortem.
-- **`ThreadedDecoder` is unusable in PyNvVideoCodec 2.2.0** — it drains after exactly one
+- **`ThreadedDecoder` is unusable in PyNvVideoCodec 2.2.0**: it drains after exactly one
   frame in every configuration probed. 2.2.3 (pinned since 2026-10-04) did not touch it:
   its source diff against 2.2.0 is the Windows ARM64 port plus the bundled libavformat
   (FFmpeg 8.1.2 → 9.0.1), nothing in the encoder, decoder or muxer code. Use the
@@ -462,8 +462,8 @@ Manager Blu-ray sample.
 - **Interlace-flagged input must not use the in-process decoder.** PyNvVideoCodec's
   `NvDecoder` picks `cudaVideoDeinterlaceMode_Adaptive` for any non-progressive sequence,
   with no Python kwarg to change it. On a BBC Blu-ray (PsF: 25p pictures, MBAFF-coded,
-  `field_order=tt`) it rewrote the odd rows — 7.8% of odd-row pixels changed by >6 levels
-  — and removed 32% of vertical detail before VSR. `_upscale_video_gpu` routes
+  `field_order=tt`) it rewrote the odd rows (7.8% of odd-row pixels changed by >6 levels)
+  and removed 32% of vertical detail before VSR. `_upscale_video_gpu` routes
   `field_order` tt/bb/tb/bt to the piped ffmpeg NVDEC decoder, which weaves.
   Re-test with `scripts/probe_nvdec_interlace.py`. Truly interlaced 50i/60i
   content would need a real deinterlacer (bwdif) ahead of VSR; not handled.
@@ -483,11 +483,11 @@ Manager Blu-ray sample.
   which is what fixed the old tail-frame loss (a raw HEVC elementary stream carries no
   timestamps, so B-frame reordering made ffmpeg's demuxer drop the last frames).
 - **Color tagging needs `setparams` in the `-vf` chain.** Raw RGB carries no color
-  metadata, so swscale uses its bt601 default while players read HD output as bt709 — a
+  metadata, so swscale uses its bt601 default while players read HD output as bt709, a
   visible hue shift. The `-colorspace`/`-color_primaries`/`-color_trc` output options
   alone leave primaries and transfer `unknown` in the stream.
 - **Verifying an encoder kwarg requires one encoder session per process.** With several
-  `CreateEncoder` calls in one process the measurements are worthless — every session
+  `CreateEncoder` calls in one process the measurements are worthless: every session
   after the first returned a byte-identical size no matter what changed. Prefer **real
   content**: on synthetic noise the `cq` response measured *inverted*.
 
@@ -550,7 +550,7 @@ these choices was measured; see [docs/PERF-HISTORY.md](docs/PERF-HISTORY.md).
   52,814,419 bytes in four containers (three bench deploys and production v25), so identity
   also held between containers there.
 
-### Settled — do not re-derive without reading the history first
+### Settled: do not re-derive without reading the history first
 
 All of these are measured; details in [docs/PERF-HISTORY.md](docs/PERF-HISTORY.md).
 
@@ -576,7 +576,7 @@ All of these are measured; details in [docs/PERF-HISTORY.md](docs/PERF-HISTORY.m
   while being ~1675 fps standalone. Moving it to a reader thread changed the attribution
   to `decode-wait 1%, infer 74%` and the throughput not at all. The thread stays because
   the attribution is honest.
-- **NVEncC cannot be adopted on Linux for VSR** — `ENABLE_NVVFX`/`ENABLE_NVSDKNGX` are
+- **NVEncC cannot be adopted on Linux for VSR**: `ENABLE_NVVFX`/`ENABLE_NVSDKNGX` are
   hard-defined to 0 in the non-WIN32 branch with no configure override, and the docs say
   Windows x64 only. Do not retry `--vpp-resize algo=ngx-vsr`.
 - **NVIDIA's Maxine VFX SDK is very likely the *same* model**, delivered through the SDK
@@ -600,11 +600,11 @@ import, where the deploying shell's environment does not exist, so a bare
 `MODAL_NVENC_PRESET=p4 modal deploy` silently measures the default. Anything added to the
 constants must also be added to the `.env({...})` block or it will appear to do nothing.
 The worker prints the resolved settings at startup (`Selected video encoder: … preset=p5,
-cq=20, multipass=fullres, level=5.1, maxrate=100M, …`) — that is the cheapest check.
+cq=20, multipass=fullres, level=5.1, maxrate=100M, …`). That is the cheapest check.
 
 Deploy variants beside production, never over it:
 `MODAL_APP_NAME=rtx-bench-<x> MODAL_GPU=<gpu> modal deploy modal_app.py`, then
-`modal app stop rtx-bench-<x> -y`. Set `MODAL_WORKER_MAX_CONTAINERS=1` when measuring —
+`modal app stop rtx-bench-<x> -y`. Set `MODAL_WORKER_MAX_CONTAINERS=1` when measuring:
 the autoscaler scales *out* rather than packing a container, hiding the effect. Compare
 **warm containers only**: the same config measures 8.0 fps cold and 12 fps warm on a 12 s
 clip, so run the clip 3-4 times in one container and read the later runs. Compute **cost
@@ -615,7 +615,7 @@ per frame**, not fps.
 The card is idle a third of the time (`encode-backpressure ~33%`), so packing two jobs per
 container looks attractive. Two blockers, both measured:
 
-1. **Fixed:** effect instances cannot be shared across threads — `Run()` is not reentrant
+1. **Fixed:** effect instances cannot be shared across threads: `Run()` is not reentrant
    and the effect reuses one internal DLPack output buffer. `_sr_cache` is now keyed by
    `(thread, role)`.
 2. **Partly fixed, still the blocker:** `jobs_volume.reload()` destroys in-flight jobs. A
@@ -638,20 +638,20 @@ back. Until then the knob is for experiments only.
 ## Verification protocol
 
 **Static checks are not evidence that this works.** Importing the app validates decorator
-arguments and nothing else — the app imported cleanly for the entire period when VSR was
+arguments and nothing else. The app imported cleanly for the entire period when VSR was
 100% broken. A change is verified only when:
 
 1. `uvx ruff check --select F,E9 modal_app.py modal_client.py` passes.
 2. `modal deploy modal_app.py` succeeds.
 3. An **image** round-trip returns correctly-scaled output.
 4. A **video** round-trip returns correct dimensions, frame count (301 for the reference
-   clip — verify against `ffprobe -count_frames` on the source, not against memory), and
-   intact audio, and the worker log says `Selected video encoder: hevc_nvenc` — not
+   clip; verify against `ffprobe -count_frames` on the source, not against memory), and
+   intact audio, and the worker log says `Selected video encoder: hevc_nvenc`, not
    `libx264`.
 5. `ffprobe` on that output reports `Main 10` / `yuv420p10le` and bt709 for **all three**
    of `color_space`, `color_primaries`, `color_transfer`. `unknown` on any of them is a
    bug. It also reports `level=153` (5.1), and two runs of the same input produce the
-   same size — a size that jumps ~2.4x between runs means the level/ceiling setup broke.
+   same size. A size that jumps ~2.4x between runs means the level/ceiling setup broke.
    Run both in **one warm container** (back to back, inside the 120 s scale-down window):
    hosts with different drivers give slightly different bytes.
 6. **Pixels are actually inspected.** Steps 4 and 5 all passed while the GPU encoder was
@@ -676,7 +676,7 @@ arguments and nothing else — the app imported cleanly for the entire period wh
    of NGX initialization. The encode phase is ~70-80 fps. `nvdec=yes` (piped) is expected
    unless NVDEC cannot decode the input (then `nvdec=no` plus that WARNING). On the
    unsegmented path, `nvdec=in-process` is expected for progressive input;
-   `nvdec=yes` is expected — and logged with a WARNING — for interlace-flagged input, and
+   `nvdec=yes` is expected (and logged with a WARNING) for interlace-flagged input, and
    means the in-process decoder was skipped for any other input. `gpu-encoder` absent
    means the piped encoder ran, a large silent downgrade worth explaining before shipping.
 8. `modal app logs rtx-media-upscaler` shows no warnings or tracebacks. (`NVENC
@@ -710,13 +710,13 @@ arguments and nothing else — the app imported cleanly for the entire period wh
 
 **The lasting lesson of the striping bug is verification, not encoders:** for a full day
 that path produced visibly broken 4K while passing frame count, `ffprobe`, a clean decode
-with zero errors, and `_check_frame_integrity`. Only looking at pixels caught it — hence
+with zero errors, and `_check_frame_integrity`. Only looking at pixels caught it, hence
 step 6.
 
 For GPU-level questions (does this library load? does this encoder exist? which encoder
 option costs the throughput?), write a small throwaway `modal run` script that probes the
 real hardware and prints results. That loop is minutes, and it is the only way to answer
-these questions — they cannot be reasoned out from documentation, as the `-12`, NVENC and
+these questions. They cannot be reasoned out from documentation, as the `-12`, NVENC and
 encoder-preset investigations all showed. Keep such a probe **standalone** (its own small
 image, no `import modal_app`): a probe that imports the app module needs
 `add_local_python_source` and fails confusingly without it.
@@ -724,13 +724,13 @@ image, no `import modal_app`): a probe that imports the app module needs
 A round-trip can be run without proxy tokens by putting the input on the Volume
 (`modal volume put rtx-upscaler-jobs <file> /<job-id>/input.mkv`) and calling
 `modal.Cls.from_name("rtx-media-upscaler", "UpscaleWorker")().run.remote(job_id=…)`
-directly — this exercises the worker without going through the web tier.
+directly. This exercises the worker without going through the web tier.
 
 ## Reusing this as a template for other Modal jobs
 
 Keep: the web/GPU split, the job-queue endpoints, the Volume-backed file handoff, proxy
 auth, `@modal.enter()` warming, the client's submit-and-poll loop, the verification
-protocol above, and — for any job that chains GPU stages — the GPU-resident data path and
+protocol above, and, for any job that chains GPU stages, the GPU-resident data path and
 the standalone-probe habit that produced it.
 
 Replace: `UpscaleWorker`'s `_upscale_*` methods and the `nvvfx` specifics. Drop the

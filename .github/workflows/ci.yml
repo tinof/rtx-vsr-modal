@@ -1,0 +1,22 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      # Syntax errors and undefined names only. The GPU code cannot run in CI;
+      # see "Verification protocol" in CLAUDE.md for what counts as verified.
+      - name: Ruff
+        run: uvx ruff check --select F,E9 modal_app.py modal_client.py scripts/
+      - name: Lockfile matches pyproject.toml
+        run: uv lock --check
