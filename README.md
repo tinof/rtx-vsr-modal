@@ -1,93 +1,281 @@
-# RTX Media Upscaler on Modal
+# RTX Video Super Resolution on Modal
 
-Runs NVIDIA RTX Video Super Resolution on [Modal.com](https://modal.com) as an
-authenticated HTTP service, and doubles as a **template for other Modal GPU jobs**.
+Upscale images and video with NVIDIA RTX Video Super Resolution (VSR) on
+[Modal](https://modal.com) GPUs. You deploy it to your own Modal workspace, send it a file
+over an authenticated HTTP API, and get the upscaled file back.
 
-Working on this with an AI agent? Read [CLAUDE.md](CLAUDE.md) first — it carries the
-conventions and the hardware constraints that are easy to break.
+A 1080p video upscaled to 4K comes back as HEVC Main 10, with every audio track kept. The
+whole video path runs on the GPU (NVDEC decode, VSR, NVENC encode), so a 1080p to 4K job runs
+at about 36 fps on a short clip and about 75 fps on a long one, where four hardware encoders
+work in parallel. Optional extras: a denoise or deblur pass before upscaling, SDR to HDR10
+conversion with NVIDIA TrueHDR, and Matroska output that copies the source's audio, subtitles
+and chapters untouched.
 
-You can:
-- Upload an image or video file.
-- Upscale it on an NVIDIA GPU (default: RTX PRO 6000 Blackwell).
-- Download the upscaled output back to your local machine.
+The project is also a working template for other Modal GPU services: a CPU web tier in front
+of a GPU worker, a job queue that gets around Modal's 150-second HTTP limit, and file handoff
+through a Modal Volume. See [Using this as a template](#using-this-as-a-template).
 
-## Architecture
+Working on the code with an AI agent? Point it at [CLAUDE.md](CLAUDE.md) (also linked as
+`AGENTS.md`). It holds the conventions and the hardware traps that have already cost days.
 
-Two tiers, so GPU time is only billed while frames are actually being upscaled:
+## Contents
 
-- **Web tier** (`api`): a CPU-only FastAPI app. It uploads the request body to a Modal Volume through the Volume API (no mount), spawns the GPU job, and streams the finished file back. Handles up to 20 concurrent requests per container.
-- **GPU worker** (`UpscaleWorker`): a GPU class whose `@modal.enter()` warms CUDA and probes the NVENC encoder once per container. The super-resolution model stays loaded between jobs that share quality and output size.
+- [Requirements and cost](#requirements-and-cost)
+- [Quick start](#quick-start)
+- [Client options](#client-options)
+- [Choosing a quality mode](#choosing-a-quality-mode)
+- [HDR10 output (TrueHDR)](#hdr10-output-truehdr)
+- [Output format](#output-format)
+- [Speed](#speed)
+- [HTTP API](#http-api)
+- [Deploy settings](#deploy-settings)
+- [Choosing a GPU](#choosing-a-gpu)
+- [How it works](#how-it-works)
+- [Three pins that are easy to break](#three-pins-that-are-easy-to-break)
+- [Limits and guarantees](#limits-and-guarantees)
+- [Troubleshooting](#troubleshooting)
+- [Comparing results and measuring](#comparing-results-and-measuring)
+- [Using this as a template](#using-this-as-a-template)
+- [License and credits](#license-and-credits)
 
-Because video jobs can run far longer than Modal's 150-second HTTP request limit, the API is asynchronous: `POST /upscale` returns a `call_id` immediately and `GET /result/{call_id}` returns 202 while pending, then the file.
+## Requirements and cost
 
-- `modal_app.py`: the Modal app (web tier + GPU worker).
-- `modal_client.py`: local client that uploads, polls, and saves the output.
+- A Modal account with GPU access. The worker runs on an **RTX PRO 6000** (Blackwell) by
+  default. It is the only Modal GPU with 9th-generation NVENC, and several larger Modal GPUs
+  have no video encoder at all (see [Choosing a GPU](#choosing-a-gpu)).
+- Python 3.13 or newer for the local client, plus the `modal` CLI. You do not need a local
+  GPU or a local ffmpeg; everything runs in the Modal containers.
+- A Modal proxy auth token pair. The endpoint requires one, because every request spends GPU
+  money.
 
-## Three Pins That Are Easy To Break
+**Cost.** At the default settings the single-encoder path takes roughly 42 minutes of GPU time
+per hour of 25 fps video (1080p to 4K), about $2.40 at Modal's 2026-10 RTX PRO 6000 rate.
+Inputs of 30 s or more use four encoders in parallel and need about half the GPU time per
+frame. Modal bills while a container is up, and a worker stays warm for 120 s after its last
+job. Check Modal's current prices before a large batch.
 
-All three are pinned in `modal_app.py`. Read this before changing the image.
+**Output size.** At the default quality target (CQ 20), grainy 4K lands roughly between 35 and
+80 Mbps. A 61-second 1080p Blu-ray sample came out at 78 Mbps, about 35 GB per hour.
 
-**1. The NGX driver library (`DRIVER_VERSION`).** RTX Video Super Resolution is an NGX
-feature. The `nvidia-vfx` wheel bundles the NGX snippet, but at runtime it `dlopen`s the
-driver-side `libnvidia-ngx.so.1` — and Modal’s container runtime does not inject that
-library. Without it, `NvVFX_Load` fails on **every** GPU type with:
+## Quick start
 
-```
-NvVFX_Load failed: The effect has not been properly initialized (code -12)
-```
+1. Install the client dependencies and log in to Modal:
 
-The image therefore installs that one library from the matching NVIDIA driver package.
-`DRIVER_VERSION` must track the host driver reported by `nvidia-smi`; the worker logs a
-warning at startup if the two diverge. The image pins `580.95.05`. Modal's hosts have moved
-on since: on 2026-11-25 containers ran on `610.57.04` and `620.70.06`, and none on 580.
-VSR and TrueHDR still load with the 580 library, so the warning fires at every start. The
-pin has not been moved, because containers land on hosts with different drivers and no
-single value matches all of them.
+   ```bash
+   git clone https://github.com/tinof/rtx-vsr-modal.git
+   cd rtx-vsr-modal
+   uv sync                       # or: pip install -r requirements.txt
+   modal token new
+   ```
 
-**2. The ffmpeg build (`FFMPEG_URL`).** NVENC availability depends on which NVIDIA Video
-Codec SDK the ffmpeg binary was linked against, and each SDK sets a minimum driver version:
+2. Deploy the app. The first deploy also builds the GPU image:
 
-| ffmpeg build | Video Codec SDK | Requires driver | Usable here |
+   ```bash
+   modal deploy modal_app.py
+   ```
+
+   Modal prints the endpoint URL, which looks like
+   `https://<workspace>--rtx-media-upscaler-api.modal.run`.
+
+3. Create a proxy auth token pair and export it for the client:
+
+   ```bash
+   modal workspace proxy-tokens create
+   export MODAL_KEY=... MODAL_SECRET=...
+   export ENDPOINT="https://<workspace>--rtx-media-upscaler-api.modal.run"
+   ```
+
+4. Upscale a file:
+
+   ```bash
+   # 2x video with the default settings (HIGHBITRATE_ULTRA, HEVC Main 10, mp4)
+   python modal_client.py --endpoint "$ENDPOINT" --input ./input.mkv --scale 2.0
+
+   # An image to exact dimensions
+   python modal_client.py --endpoint "$ENDPOINT" --input ./input.png \
+       --resize-type "target dimensions" --width 1920 --height 1080 --quality HIGH
+   ```
+
+The client uploads the file, waits for the worker, and saves `*_upscaled.png`,
+`*_upscaled.mp4` or `*_upscaled.mkv` next to the input unless you pass `--output`. It prints
+the job's `call_id` at submit time. If the client stops, resume with `--call-id <call_id>`
+instead of uploading again. Network errors and proxy 502/503/504 answers are retried with
+backoff. The download goes to `<output>.part` and is renamed only when its size matches
+`Content-Length`.
+
+The first job in a fresh container also pays about 10 to 14 s of NGX initialization.
+
+## Client options
+
+| Option | Default | What it does |
+|---|---|---|
+| `--endpoint` | (required) | The URL `modal deploy` printed. |
+| `--input` | | Local image or video file. Video is recognised by extension (`.mp4`, `.mov`, `.mkv`, `.avi`, `.webm`, `.m4v`) or MIME type. |
+| `--output` | `*_upscaled.<ext>` | Where to save the result. |
+| `--resize-type` | `scale by multiplier` | Or `target dimensions`. |
+| `--scale` | `2.0` | Multiplier for `scale by multiplier`. Must be at least 1.0. |
+| `--width`, `--height` | `1920`, `1080` | Box for `target dimensions`. |
+| `--no-keep-aspect-ratio` | aspect kept | Stretch to the exact box instead of fitting inside it. |
+| `--quality` | `HIGHBITRATE_ULTRA` | Upscaling model. See [Choosing a quality mode](#choosing-a-quality-mode). |
+| `--preprocess` | none | Optional `DENOISE_*` or `DEBLUR_*` pass at input size before upscaling. |
+| `--strength`, `--preprocess-strength` | `1.0` | Effect strength, 0.0 to 1.0. Lower values blend the model's effect back towards a plain resample. |
+| `--truehdr [settings]` | off | SDR to HDR10 output for video. See [HDR10 output](#hdr10-output-truehdr). |
+| `--master-display`, `--max-cll` | see HDR10 | HDR10 static metadata. |
+| `--container` | `mp4` | `mkv` copies the source's audio, subtitles and chapters as they are. |
+| `--call-id` | | Resume waiting for a job that was already submitted. |
+| `--timeout`, `--poll-interval` | 3 h, 5 s | How long and how often to poll. |
+
+## Choosing a quality mode
+
+NVIDIA's VSR SDK has 19 models in four families, all probed working on the RTX PRO 6000. They
+have two roles:
+
+| Parameter | Accepted values | What it does |
+|---|---|---|
+| `quality` | `BICUBIC`, `LOW`, `MEDIUM`, `HIGH`, `ULTRA` | Upscales and suppresses compression artifacts, which also softens clean sources. |
+| `quality` | `HIGHBITRATE_LOW` to `HIGHBITRATE_ULTRA` | Upscales without artifact suppression, for clean or high-bitrate sources. |
+| `preprocess` | `DENOISE_LOW` to `DENOISE_ULTRA` | Same-resolution pass before upscaling. Removes macro-blocking and mosquito noise. |
+| `preprocess` | `DEBLUR_LOW` to `DEBLUR_ULTRA` | Same-resolution pass before upscaling. Sharpens soft footage. |
+
+A mode in the wrong role (a deblur mode as `quality`, say) is rejected with `400` before any
+GPU work.
+
+**The default is `HIGHBITRATE_ULTRA`, not `ULTRA`.** "High bitrate" means few compression
+artifacts, not high resolution. Broadcast archive material is usually soft but cleanly
+encoded, so the standard family has no real artifacts to remove. It removes texture instead
+and leaves a blotchy, painterly look. On the reference clip, mode 19 (`HIGHBITRATE_ULTRA`)
+beat mode 4 (`ULTRA`) on both axes: about 15% more edge detail and roughly 8x less
+flat-region noise. Use `ULTRA` for heavily compressed, blocky encodes.
+
+**Check what the source really holds before judging the output.** A "1080p" broadcast file is
+often an SD master that someone already upscaled. Downscale a frame to 540p and back up. If
+that reproduces the file almost exactly (mean absolute difference below 1/255), there is no
+real detail for VSR to recover, and the output will look close to a Lanczos resize at any
+setting.
+
+**Preprocess costs a second inference pass per frame**, so use it only when the source is the
+limiting factor. Measured on a soft, already-upscaled SD master, all with `HIGHBITRATE_ULTRA`:
+
+| Preprocess | Edge detail | Flat-region noise | Temporal flicker |
 |---|---|---|---|
-| BtbN `master-latest` | 13.1.15 | 610.0+ | No — NVENC silently unavailable |
-| BtbN `n8.1` (pinned) | 570-compatible | 570.0+ | Yes, including `av1_nvenc` |
-| Debian apt ffmpeg 5.1 | — | — | Yes, but no `av1_nvenc` |
+| none | 3.7 | 0.10 | 1.89 (baseline) |
+| `DEBLUR_LOW` | 6.5 | 0.11 | +22% |
+| `DEBLUR_MEDIUM` | 6.6 | 0.12 | +18% |
+| `DEBLUR_HIGH` | 5.9 | 0.12 | +12% |
+| `DEBLUR_ULTRA` | 5.6 | 0.09 | +5% |
 
-Pointing `FFMPEG_URL` at `master-latest` makes every NVENC encoder fail to initialise and
-the worker falls back to CPU `libx264`. Encoder preference is `hevc_nvenc` → `h264_nvenc`
-→ `libx264`; `av1_nvenc` also works on the pinned build if you want it, but HEVC is the
-safer default for MP4 playback.
+Two results contradict the mode names:
 
-The table was measured on 580 hosts. Hosts on 610 and later meet `master-latest`'s driver
-requirement, but the fleet is mixed and that build has not been re-tested, so the pin stays.
+- **Deblur intensity is not monotonic.** `DEBLUR_LOW` and `DEBLUR_MEDIUM` give more apparent
+  detail than `DEBLUR_HIGH` and `DEBLUR_ULTRA`. The upper rungs seem to regularise more
+  alongside the sharpening.
+- **Judge deblur in motion.** Flat-region noise that changes from frame to frame is what looks
+  bad on screen. `DEBLUR_ULTRA` adds about 50% detail for 5% more flicker. `DEBLUR_LOW` looks
+  best on a still and flickers the most.
 
-**3. mkvmerge (`MKVTOOLNIX_VERSION`).** The Matroska output uses `mkvmerge` 104 from the
-MKVToolNix author's apt repository, pinned by version, with the repository key checked by
-hash. Debian bookworm's own v74 does not see mp4 timed-text subtitles and drops them
-without an error.
+Start without preprocess. If a soft source needs more bite, try `DEBLUR_ULTRA` on a short clip
+and watch it in motion before a batch run:
 
-## Video output format and throughput
+```bash
+python modal_client.py --endpoint "$ENDPOINT" --input ./soft_source.mkv \
+    --scale 2.0 --quality HIGHBITRATE_ULTRA --preprocess DEBLUR_ULTRA
+```
 
-Video jobs run **entirely on the GPU**: NVDEC decodes, super-resolution runs on the decoded
-CUDA tensor, and NVENC encodes straight from GPU memory. Output is **HEVC Main 10**
-(`yuv420p10le`, Level 5.1 High tier) tagged bt709 for matrix, primaries and transfer, or
-HDR10 when `truehdr` is set (see below).
+**Effect strength.** `strength` scales the upscale model's effect and `preprocess_strength`
+the preprocess pass, in every family. Detail on one 1080p web-encode still at 2x (mean
+absolute Laplacian; a plain `BICUBIC` upscale scores 1.01):
 
-### Output container: mp4 or Matroska
+| Mode | strength 1.0 | 0.5 | 0.0 |
+|---|---|---|---|
+| `ULTRA` | 2.98 | 1.78 | 1.24 |
+| `HIGHBITRATE_ULTRA` | 2.40 | 1.68 | |
+| `HIGHBITRATE_ULTRA` + `DENOISE_MEDIUM` preprocess | 1.59 | 1.86 | 2.40 (no preprocess) |
+| `HIGHBITRATE_ULTRA` + `DEBLUR_ULTRA` preprocess | 3.48 | 2.52 | 2.40 (no preprocess) |
 
-The container is **mp4** by default. `container=mkv` writes Matroska from the same encode:
-`mkvmerge` takes the video and copies the source's audio, subtitles, chapters, attachments
-and tags as they are. mp4 has to re-encode audio it cannot carry (DTS, TrueHD) to AAC and
-drops subtitles; the MKV keeps them, and converts mp4 timed text to SRT. The MKV track
-header repeats the colour signalling and, for HDR10, the mastering display and
-MaxCLL/MaxFALL. mkvmerge does not copy those from the bitstream, and players that read
-colour from the container would otherwise see an untagged stream. A source that mkvmerge
-cannot read is rejected with 400 before any GPU work. Image inputs have no container.
+These come from a single still; noise and flicker in motion were not measured. At 1.0 the SDK
+call is unchanged from before the option existed.
 
-### Default encoder settings
+## HDR10 output (TrueHDR)
 
-Chosen by measurement on 2026-10-03 (BBC Blu-ray, 1080p→4K, `HIGHBITRATE_ULTRA`; details in
-[docs/PERF-HISTORY.md](docs/PERF-HISTORY.md)). The NVEncC equivalent is:
+`--truehdr` turns an SDR video into HDR10 with NVIDIA's TrueHDR model. It runs on every frame
+after super-resolution, at output size, in the same GPU loop. The output is HEVC Main 10
+tagged BT.2020 / PQ (SMPTE ST 2084) / BT.2020 non-constant luminance, limited range, chroma
+sited top-left. Every keyframe carries the HDR10 mastering-display and content-light-level
+SEI, and the mp4 gets a `colr` box.
+
+The parameters follow NVEncC and StaxRip, so a desktop command line carries over:
+
+| StaxRip / NVEncC | This service | Default |
+|---|---|---|
+| `--vpp-ngx-truehdr contrast=…,saturation=…,middlegray=…,maxluminance=…` | `truehdr` (same `key=value` list, or `on`) | `contrast=102,saturation=102,middlegray=46,maxluminance=680` |
+| (no switch) | `truehdr=…,debanding=off` skips TrueHDR's debanding pass | debanding on |
+| `--master-display "G(…)B(…)R(…)WP(…)L(max,min)"` | `master_display` (same string) | `G(8500,39850)B(6550,2300)R(35400,14600)WP(15635,16450)L(<maxluminance>×10000,1)` |
+| `--max-cll "MaxCLL,MaxFALL"` | `max_cll` (same string; 0 = unknown) | measured per job |
+| `--colormatrix bt2020nc --colorprim bt2020 --transfer smpte2084 --chromaloc 2` | always set with `truehdr` | |
+| `--vpp-resize algo=ngx-vsr,vsr-quality=4` | `quality=ULTRA` | `HIGHBITRATE_ULTRA` |
+
+```bash
+python modal_client.py --endpoint "$ENDPOINT" --input ./input.mkv --scale 2.0 \
+    --truehdr "contrast=102,saturation=102,middlegray=46,maxluminance=680"
+```
+
+- **Order: VSR first, then TrueHDR**, as in NVEncC, whatever the command-line order. In a
+  probe, running VSR on PQ data instead made bright edges overshoot from about 650 to about
+  3200 nits.
+- **No crop or pad.** The output keeps the source aspect. Black stays at 0 nits, so bars
+  inside the source stay black.
+- **The default primaries are BT.2020**, as in the reference StaxRip command
+  (G 0.170/0.797, R 0.708/0.292). Discs usually signal P3-D65,
+  `G(13250,34500)B(7500,3000)R(34000,16000)WP(15635,16450)L(…)`; pass that if you prefer it.
+- **MaxCLL and MaxFALL are measured per job.** Without `max_cll`, the worker measures the
+  brightest pixel and the brightest frame average of the encoded frames and writes those
+  values (rounded up) into every keyframe. An explicit `max_cll="a,b"` is written as given.
+  The 300 nits of the StaxRip command overstate MaxFALL on dark drama, where test clips
+  measured 30-52 nits. Letterbox bars count in the frame average, so MaxFALL reads slightly
+  low on letterboxed sources (about 1.33x low for 2.39:1 in a 16:9 frame). The worker log
+  prints the values: `HDR10 light levels: measured … ; written … (measured)`.
+- **Speed.** TrueHDR adds about 1 ms of GPU work per 4K frame and the BT.2020 conversion about
+  1.2 ms. Short inputs run at SDR speed. On the four-encoder path the encode phase measured
+  14-18% slower (55-63 against 67-72 fps). `debanding=off` cut TrueHDR from 0.31 to 0.14 ms
+  per frame at 1080p.
+- **Rejected with `400`:** image inputs, sources that are already HDR (PQ or HLG), and outputs
+  above 8192x4320. If the GPU encoder path is unavailable the job fails instead of quietly
+  writing SDR.
+
+## Output format
+
+**Video** is HEVC Main 10 (`yuv420p10le`, Level 5.1, High tier), tagged bt709 for matrix,
+primaries and transfer, or HDR10 with `truehdr`. 10-bit is used even for 8-bit sources: it
+costs nothing on NVENC and keeps upscaled gradients from banding.
+
+**Container.** mp4 is the default. Every source audio track is kept. A track is stream-copied
+when mp4 can carry its codec (AAC, AC-3, E-AC-3, Opus, ALAC, MP3, FLAC); any other codec (DTS,
+TrueHD, PCM, ...) is re-encoded to AAC 192k for that track only, with a warning in the worker
+log. mp4 output drops subtitles.
+
+`container=mkv` writes Matroska from the same encode. `mkvmerge` copies the source's audio,
+subtitles, chapters, attachments and tags without re-encoding, and converts mp4 timed text to
+SRT. The MKV track header repeats the colour signalling and, for HDR10, the mastering display
+and MaxCLL/MaxFALL, because players that read colour from the container would otherwise see
+an untagged stream. A source mkvmerge cannot read is rejected with `400` before any GPU work.
+
+**10-bit SDR sources** (for example `yuv420p10le` HEVC) are decoded as packed 10-bit RGB, and
+VSR and any preprocess pass run in the SDK's 10-bit mode, so the extra precision reaches the
+model. 8-bit sources are unaffected.
+
+**Interlace-flagged sources.** Many UK and EU HD discs carry progressive 25p pictures in a
+1080i container (PsF). The in-process GPU decoder deinterlaces any interlace-flagged stream,
+and on such a disc it removed 32% of vertical detail before VSR saw the frame. The worker
+therefore decodes these inputs through ffmpeg's NVDEC path, which weaves the fields
+losslessly, and logs a warning saying so. Truly interlaced 50i/60i video would need a real
+deinterlacer, which is not included.
+
+**Images** come back as PNG.
+
+### Encoder settings
+
+The quality point was chosen on 2026-10-03 by VMAF against a lossless encode of the same VSR
+frames (a BBC Blu-ray, 1080p to 4K). As an NVEncC command line:
 
     --qvbr 20 --codec h265 --preset p5 --tune uhq --output-depth 10 --profile main10
     --tier high --level 5.1 --max-bitrate 100000 --multipass 2pass-full --aq
@@ -95,111 +283,27 @@ Chosen by measurement on 2026-10-03 (BBC Blu-ray, 1080p→4K, `HIGHBITRATE_ULTRA
 
 | Setting | Default | Why |
 |---|---|---|
-| Preset | `p5` | P6 and P7 add only 0.06–0.15 VMAF over P5 and cost about 30% more encode time. |
+| Preset | `p5` | P6 and P7 add only 0.06 to 0.15 VMAF over P5 and cost about 30% more encode time. |
 | Multipass | `fullres` (2pass-full) | About 1.1 VMAF better than `qres` at the same bitrate. |
-| Tuning | `uhq` | 1.7 VMAF better than `hq` with 19% fewer bits. UHQ also enables NVENC's temporal filter and deeper lookahead; PyNvVideoCodec cannot set those separately. |
+| Tuning | `uhq` | 1.7 VMAF better than `hq` with 19% fewer bits. |
 | CQ | `20` | A file-size choice. CQ 18 measured about 80 Mbps (VMAF 94.3), CQ 24 about 35 Mbps (VMAF 91.3). |
-| Level / ceiling | `5.1` High, 100 Mbps | See below. Above 4096x2176 the driver picks the level. |
+| Level / ceiling | `5.1` High, 100 Mbps | Above 4096x2176 the driver picks the level. |
 
-10-bit encoding is used even for 8-bit sources because it costs nothing on NVENC and keeps
-upscaled gradients from banding.
+**Why the bitrate ceiling is set explicitly.** PyNvVideoCodec zeroes NVENC's `maxBitRate`
+whenever a CQ target is set, and the driver then applies its own VBR ceiling: about 20 Mbps at
+Level 5.0, 32 Mbps at 5.1, 48 Mbps at 6.0. Grainy 4K hit that ceiling, so CQ 18 and CQ 24 gave
+the same file size. With the level unset the driver also picked it per session, so the same
+job sometimes gave a 2.4x larger file. The worker sets Level 5.1 for outputs up to 4K and
+restores a 100 Mbps ceiling with a 1 s buffer. After a job with a different output size, NVENC
+sometimes rejects the explicit level; the worker then retries with the driver's level and logs
+a warning. The ceiling, and so the file size, is the same either way.
 
-**The bitrate ceiling matters more than the preset.** PyNvVideoCodec zeroes `maxBitRate`
-whenever a CQ target is set, and the driver then applies its own VBR ceiling: about
-20 Mbps at Level 5.0, 32 Mbps at 5.1, 48 Mbps at 6.0. Before 2026-10-03 every 4K output
-hit that ceiling, so CQ 18 and CQ 24 produced the same file size. The driver also picked
-the level per session (5.0 or 6.0 for the same input), so the same job sometimes produced a
-2.4x larger file. The worker now sets Level 5.1 explicitly for outputs up to 4K and
-restores a 100 Mbps ceiling (1 s buffer) with `Reconfigure()` before the first frame. In
-some warm-container states (a job right after one with a different output size) NVENC
-rejects the explicit level; the worker then retries with the driver's level and logs a
-warning. The ceiling, and so the file size, is the same either way. Expect output bitrate to follow the content:
-grainy 4K at CQ 20 lands roughly between 35 and 80 Mbps.
+All of these are deploy-time settings: see [Deploy settings](#deploy-settings).
 
-### HDR10 output (TrueHDR)
+## Speed
 
-Pass `truehdr` to turn an SDR video into HDR10. NVIDIA's TrueHDR model (nvidia-vfx
-0.2.0.0) runs on each frame after super-resolution, at output size, in the same GPU loop
-as VSR and the encoder. The output is HEVC Main 10 tagged BT.2020 / PQ (SMPTE ST 2084) /
-BT.2020 non-constant luminance, limited range, with chroma sited top-left. Every keyframe
-carries the HDR10 mastering-display and content-light-level SEI. The mp4 also gets a
-`colr` box.
-
-The parameters follow NVEncC/StaxRip, so a desktop command line carries over:
-
-| StaxRip / NVEncC | This service | Default |
-|---|---|---|
-| `--vpp-ngx-truehdr contrast=…,saturation=…,middlegray=…,maxluminance=…` | `truehdr` (same `key=value` list, or `on` for the defaults) | `contrast=102,saturation=102,middlegray=46,maxluminance=680` |
-| (no switch) | `truehdr=…,debanding=off` skips TrueHDR's debanding pass | debanding on |
-| `--master-display "G(…)B(…)R(…)WP(…)L(max,min)"` | `master_display` (same string) | `G(8500,39850)B(6550,2300)R(35400,14600)WP(15635,16450)L(<maxluminance>×10000,1)` |
-| `--max-cll "MaxCLL,MaxFALL"` | `max_cll` (same string; 0 = unknown) | measured per job |
-| `--colormatrix bt2020nc --colorprim bt2020 --transfer smpte2084 --chromaloc 2` | always set when `truehdr` is on | |
-| `--vpp-resize algo=ngx-vsr,vsr-quality=4` | `quality=ULTRA` | `HIGHBITRATE_ULTRA` (better on clean sources, see below) |
-
-```bash
-python modal_client.py --endpoint "$ENDPOINT" --input ./episode.mkv --scale 2.0 \
-	--truehdr "contrast=102,saturation=102,middlegray=46,maxluminance=680"
-```
-
-Notes:
-- **Order matches NVEncC.** NVEncC applies resize, then pad, then TrueHDR, whatever the
-  command-line order. VSR therefore always sees SDR. Running VSR on PQ data instead made
-  bright edges overshoot from about 650 to about 3200 nits in a probe.
-- **No crop or pad.** StaxRip's `--vpp-pad` puts back bars it cropped earlier. Here the
-  output keeps the source aspect. Black stays at 0 nits through TrueHDR, so bars inside the
-  source stay black.
-- **The default primaries are BT.2020.** The default `master_display` primaries (G 0.170/0.797,
-  R 0.708/0.292) are BT.2020, not P3, as in the reference StaxRip command. P3-D65,
-  `G(13250,34500)B(7500,3000)R(34000,16000)WP(15635,16450)L(…)`, is the common disc
-  convention; pass it if you prefer it.
-- **MaxCLL/MaxFALL are measured per job by default.** Without `max_cll`, the worker measures
-  the brightest pixel and the brightest frame average of the frames it encoded and writes
-  those values (rounded up) into the content-light-level SEI on every keyframe. An explicit
-  `max_cll="a,b"` is written as given. This is a contract change: outputs made before it
-  carried the static `<maxluminance>,300` (680/300). The 300 nits of the StaxRip command
-  overstate MaxFALL a lot on dark drama: the test clips measured 30-52 nits. Full films with
-  bright scenes measure higher, which is why the value is measured per job rather than
-  replaced by another constant. The worker log prints both (`HDR10 light levels: measured
-  … ; written … (measured)`). Letterbox bars count in the frame average, so MaxFALL reads
-  slightly low on letterboxed sources (about 1.33x low for 2.39:1 in a 16:9 frame).
-- **Speed.** TrueHDR adds about 1 ms of GPU work per 4K frame and the BT.2020
-  conversion about 1.2 ms. On the single-session path (inputs under 30 s) HDR runs at SDR
-  speed. On the four-session path, the encode phase measured 14-18% slower (55-63 against
-  67-72 fps), because every session's per-frame sync waits on the others' extra GPU work.
-  `debanding=off` cut TrueHDR from 0.31 to 0.14 ms per frame at 1080p.
-- **What is rejected (`400`):** image inputs, sources that are already HDR (PQ or HLG
-  transfer), and outputs above 8192x4320.
-  Without the GPU encoder path the job fails instead of silently writing SDR.
-
-### 10-bit sources
-
-SDR sources with 10 or more bits per sample (for example `yuv420p10le` HEVC) are decoded
-as packed 10-bit RGB (`x2bgr10le`). VSR and any `preprocess` pass then run in nvvfx's
-RGB10A2 mode, so the extra precision reaches the model. Before 2026-10 these sources were
-rounded to 8 bits at decode, so their output pixels now differ slightly. The 10-bit path
-does not touch 8-bit sources. Separately, the nvidia-vfx 0.2.0.0 upgrade itself moved about
-3% of VSR output values by exactly 1/255 for every source (see
-[docs/PERF-HISTORY.md](docs/PERF-HISTORY.md)). These inputs use the piped ffmpeg NVDEC decoder, because in-process NVDEC
-delivers 8-bit RGB only, and the log says so. HDR sources keep the 8-bit path.
-
-### Interlace-flagged sources (UK/EU Blu-ray and broadcast)
-
-Many HD discs carry progressive 25p pictures in a 1080i container (PsF). PyNvVideoCodec
-creates its decoder in Adaptive deinterlace mode for any interlace-flagged stream, and that
-mode rewrote one field's rows on such a disc: 32% of vertical detail was gone before VSR saw
-the frame. The worker therefore decodes interlace-flagged inputs through ffmpeg's NVDEC
-path, which weaves the fields losslessly, and logs a warning saying so. That path converts
-to RGB with exact swscale flags (`accurate_rnd+full_chroma_int`; the default lookup tables
-sit about 1.6 luma levels dark), picks BT.709 for untagged HD, and passes frames through
-1:1. Truly interlaced 50i/60i video would need a real deinterlacer; that is not handled.
-
-## Performance
-
-Measured on RTX PRO 6000 Blackwell Server Edition, 1080p→4K, `HIGHBITRATE_ULTRA`, warm
-containers. Read the measurement rules at the end of this section before you compare a
-new number against them.
-
-### The encoder is the limit
+Measured on the RTX PRO 6000 Blackwell Server Edition, 1080p to 4K, `HIGHBITRATE_ULTRA`, warm
+containers:
 
 | Stage, measured alone | Speed |
 |---|---|
@@ -211,415 +315,288 @@ new number against them.
 | NVENC, P6 + 2pass-full + UHQ | 27.5 fps |
 | NVENC, P7 + 2pass-full + UHQ | about 24 fps |
 
-One encoder session is the bottleneck. With the defaults a job runs at about **36 fps** end
-to end (1080p→4K, warm): roughly 42 minutes of GPU time per hour of 25 fps video, about
-$2.40 at Modal's 2026-10 RTX PRO 6000 rate. On the 61-second Night Manager Blu-ray sample
-CQ 20 produced 78 Mbps, i.e. about 35 GB per hour of grainy 4K. Overlapping VSR with
-encode measured no faster, because the encoder is already busy all the time.
+The encoder is the bottleneck, not the model. A single session runs a job at about **36 fps**
+end to end.
 
-The card has **four NVENC engines** and one session uses one. Since 2026-10-04, videos of
-30 s or more are cut at source keyframes into segments (up to 30 s each), encoded by four
-sessions in parallel, and joined without re-encoding. That runs at about **75 fps** end to
-end on a 10-minute 1080p clip (83 fps in the encode phase) and **55 fps** on the 61-second
-Blu-ray sample, where the fixed per-job costs (creating four encoders, joining) weigh
-more. For long inputs that is about half the GPU time per frame of the single-session
-path; on the 61-second sample, two thirds. Four UHQ sessions do not scale linearly: each
-slows to ~26 fps when all four run. Shorter clips keep the single-session path. The output
-format is unchanged (Main 10, level 5.1, bt709), and mean VMAF against a lossless encode
-is the same (91.27 vs 91.25). Within one warm container the bytes are identical run to
-run. Segmenting also keeps memory bounded on feature-length inputs, which the
-single-session muxer did not. PyNvVideoCodec 2.2.x exposes no split-frame encoding option,
-so a single session cannot spread one frame over several engines.
+The card has four NVENC engines. Inputs of 30 s or more are cut at source keyframes into
+segments of up to 30 s, encoded by four sessions in parallel, and joined without re-encoding.
+That runs at about **75 fps** end to end on a 10-minute 1080p clip (83 fps in the encode phase)
+and 55 fps on the 61-second sample, where the fixed costs (creating four encoders, joining)
+weigh more. Four UHQ sessions do not scale linearly: each slows to about 26 fps when all four
+run. Mean VMAF against a lossless encode is the same either way (91.27 vs 91.25), and the
+segmented path keeps memory bounded on feature-length inputs.
 
-A segmented job logs `Video done: 1526 frames in 27.6s = 55.4 fps (setup 2.8s [effects
-0.0s, encoders 2.7s], encode 20.7s = 73.9 fps, join 4.1s; sessions=4, segments=4; …)`. The
-first job in a container also pays ~10-14 s of NGX initialization in `effects`. A
-single-session job logs a line like `Video done: 1526 frames in 42.8s = 35.7 fps
-(decode-wait 1%, infer 34%, encode 54%; nvdec=yes, batch=1, gpu-encoder=yes)` (an
-interlace-flagged Blu-ray, hence `nvdec=yes`; progressive input shows `nvdec=in-process`).
-The `infer` share includes time spent waiting for the encoder to accept the next frame.
-Use it to spot a regression or a silent fallback. `nvdec=yes` is expected for
-interlace-flagged inputs.
+The worker logs one summary line per job. A segmented job:
 
-### Earlier history
+    Video done: 1526 frames in 27.6s = 55.4 fps (setup 2.8s [effects 0.0s, encoders 2.7s],
+    encode 20.7s = 73.9 fps, join 4.1s; sessions=4, segments=4; …)
 
-The original pipeline piped rawvideo through two ffmpeg processes and ran at 12 fps.
-Keeping every frame on the GPU took it to 56–60 fps at the old P4 + qres settings. The
-full history, including the stage-isolation tables from that era, is in
+A single-session job:
+
+    Video done: 1526 frames in 42.8s = 35.7 fps (decode-wait 1%, infer 34%, encode 54%;
+    nvdec=yes, batch=1, gpu-encoder=yes)
+
+`gpu-encoder=yes` means NVENC encoded from GPU memory. `nvdec=in-process` is expected for
+progressive input on the single-session path; `nvdec=yes` means the piped NVDEC decoder ran,
+which is normal for interlace-flagged input and on the segmented path. The `infer` share
+includes time spent waiting for the encoder.
+
+The full measurement history, from the original 12 fps pipeline onward, is in
 [docs/PERF-HISTORY.md](docs/PERF-HISTORY.md).
 
-### How to measure without fooling yourself
+## HTTP API
 
-1. **Compare warm containers only.** The same configuration measured 8.0 fps cold and
-   12 fps warm on a 12-second clip. The effect loads once per container. Run the clip
-   three or four times in one container and read the later runs.
-2. **Use real content.** On synthetic noise the `cq` response measured inverted.
-3. **Use one encoder session per container.** With several `CreateEncoder` calls in one
-   process the measurements are worthless. The same settings measured 17199 KiB and
-   7204 KiB on different runs, and every session after the first returned an identical
-   size whatever changed. `scripts/probe_gpu_encoder.py` runs each variant in its own
-   container for this reason.
-4. **Check the pixels, not only the metadata.** See the note below.
+The client is a thin wrapper around three endpoints. Every request needs the proxy auth
+headers.
 
-### Speed is not correctness
-
-For a full day this path produced visibly striped 4K while passing frame count, `ffprobe`,
-a clean decode with zero errors, and the built-in integrity check. Two cheap checks catch
-that class of failure, and both belong in any benchmark run:
-
-- **Flat frames.** Decode every frame small and count frames whose standard deviation is
-  above 1. A count below the frame count means frames encoded as flat grey.
-- **Striping.** Take the mean absolute Laplacian of a 512-pixel crop. It should land near
-  the source value (1–3 on the reference clip). About 190 means column striping.
-
-`scripts/probe_p010_encode.py` runs both checks against a synthetic clip.
-
-Two escape hatches exist for inputs the GPU path cannot take. `MODAL_GPU_DECODER=0` falls
-back to a decode subprocess (this also happens automatically for codecs NVDEC cannot
-handle), and `MODAL_GPU_ENCODER=0` falls back to piping frames to ffmpeg. Both fallbacks
-use the same encoder quality point, and every degradation is logged with its cause.
-
-## Choosing a GPU
-
-The default is `RTX-PRO-6000`. Change it with `MODAL_GPU`.
-
-### Which Modal GPUs can run this job at all
-
-NVENC is a separate hardware engine from the CUDA cores. Several Modal GPUs have none.
-
-| GPU | NVENC engines | Usable for this service |
-|---|---|---|
-| RTX PRO 6000 (Blackwell) | Yes, 9th generation | Yes — current default |
-| L40S | Yes | Yes |
-| H100, H200, A100, B200, B300 | **None** | No — falls back to CPU `libx264` |
-
-A GPU with no NVENC still produces correct output, but it encodes on the CPU at roughly a
-tenth of the speed. Paying more for such a card buys less throughput, not more.
-
-### Cost per frame, not cost per second
-
-Throughput alone is the wrong measure. Compare cost per frame:
-
-    cost per frame = (GPU + CPU + memory cost per second) / fps
-
-Measured on a 302-frame clip, warm, **on the older piped architecture**:
-
-| Configuration | fps | Cost per second | Cost per frame |
-|---|---|---|---|
-| RTX PRO 6000, `cpu=12` | 11.7 | $0.001053 | $0.0000900 |
-| **RTX PRO 6000, `cpu=6`** (current) | **12.2** | **$0.000974** | **$0.0000798** |
-| RTX PRO 6000, `cpu=4` | 12.3 | $0.000948 | $0.0000771 |
-| L40S, `cpu=12` | 6.8 | $0.000753 | $0.0001107 |
-
-L40S is cheaper per second but loses on cost per frame: 56% of the throughput for 72% of
-the cost. It needed at least 71.5% of RTX throughput to break even. It is not broken — NGX
-loads and `hevc_nvenc` is selected — it is inference-bound at 75%.
-
-### Read this before the next GPU benchmark
-
-**The table above was measured on the piped architecture, when the pipeline ran at 12 fps
-and was bound by contention between processes. The current path is bound by
-super-resolution inference. The ranking may therefore change, and every row needs
-re-deriving before it is trusted.**
-
-Run a benchmark like this:
-
-1. Deploy a variant beside production instead of replacing it:
-   `MODAL_APP_NAME=rtx-bench-l40s MODAL_GPU=L40S modal deploy modal_app.py`.
-2. Set `MODAL_WORKER_MAX_CONTAINERS=1`. The autoscaler otherwise scales out rather than
-   packing a container, which hides what you are trying to measure.
-3. Run the same clip three or four times in one container. Read the later runs only.
-4. Record fps, the stage attribution from the `Video done:` line, and the output size.
-5. Run the two pixel checks above. A fast GPU that emits striped frames has not won.
-6. Compute cost per frame from Modal's current per-second price for that GPU, plus the CPU
-   and memory you requested.
-7. Stop the bench app when finished: `modal app stop rtx-bench-l40s -y`.
-
-Environment knobs exist for exactly this: `MODAL_APP_NAME`, `MODAL_GPU`,
-`MODAL_WORKER_CPU`, `MODAL_WORKER_MAX_CONTAINERS`, and `MODAL_MAX_BATCH`. Note that these
-are read at container import, so they must be baked into the image. A bare
-`MODAL_GPU=L40S modal deploy` in the deploying shell silently measures the default.
-
-Two constraints travel with the GPU choice. Blackwell is `sm_120` and needs
-`torch==2.13.0`. Torch 2.6 fails there with "no kernel image is available". And
-`DRIVER_VERSION` must match the host driver of whichever GPU you land on.
-
-## Behaviour Contract & Safeguards
-
-- Resize type options:
-	- `scale by multiplier`
-	- `target dimensions`
-- **Aspect Ratio Preservation**: In `target dimensions` mode, `keep_aspect_ratio` defaults to `true` (fits the output inside the requested bounding box without distortion). Set to `false` (or use `--no-keep-aspect-ratio` in the CLI) to stretch to exact dimensions.
-- Output dimensions are aligned to multiples of 8 (minimum 8).
-- Quality mapping: `LOW`, `MEDIUM`, `HIGH`, `ULTRA`, plus the rest of the SDK's model
-  families (see below).
-- **Output Limits & Safeguards**:
-	- **Upscaling Only**: Downscaling is rejected (`400`). `scale` must be $\ge 1.0$, and computed target output cannot be smaller than input dimensions.
-	- **Maximum Output Edge**: Capped at 16384 pixels. Requests exceeding 16384 on any edge are rejected (`400`) before starting GPU work.
-	- **Hybrid VSR Resampling**: Super-resolution runs at the trusted hardware limit ($\le 15360$ px) and resamples up to 16384 via high-precision GPU bicubic interpolation, avoiding the SDK's known blue-channel collapse defect at 16K.
-	- **Integrity Checks**: Every frame is checked on GPU for non-finite values (NaN/Inf) and channel collapse before delivery.
-- Batch sizing guard preserved using max-pixel heuristic:
-	- `MAX_PIXELS = 1024 * 1024 * 16`
-- **Attribution**: This service began as a port of the Comfy-Org ComfyUI custom node and
-  keeps its resize, quality, alignment and batching behaviour. See [NOTICE](NOTICE) for the
-  Apache-2.0 credits to Comfy-Org and `whmc76/ComfyUI-NVIDIA-RTX-VSR-Pro`.
-
-## Prerequisites
-
-- Modal CLI installed and authenticated:
-	- `pip install modal`
-	- `modal token new`
-- NVIDIA GPU runtime in Modal (configured by deployment).
-- A proxy auth token pair, since the endpoint requires authentication:
-	- `modal workspace proxy-tokens create`
-	- Export the pair for the client: `export MODAL_KEY=... MODAL_SECRET=...`
-
-## Install Dependencies
+Submit a job. The response contains a `call_id`:
 
 ```bash
-pip install -r requirements.txt
+curl -X POST "$ENDPOINT/upscale" \
+    -H "Modal-Key: $MODAL_KEY" -H "Modal-Secret: $MODAL_SECRET" \
+    -F "file=@./input.png" \
+    -F "resize_type=scale by multiplier" \
+    -F "scale=2.0"
 ```
 
-## Deploy to Modal
+The form fields match the client options: `resize_type`, `scale`, `width`, `height`,
+`keep_aspect_ratio`, `quality`, `preprocess`, `strength`, `preprocess_strength`, `truehdr`
+(`on` or a `contrast=…,maxluminance=…` list), `master_display`, `max_cll` and `container`.
 
-Default GPU is `RTX-PRO-6000`.
+Poll for the result. While the job runs this returns HTTP 202; when it is done it returns the
+file:
 
 ```bash
-modal deploy modal_app.py
+curl "$ENDPOINT/result/fc-XXX" \
+    -H "Modal-Key: $MODAL_KEY" -H "Modal-Secret: $MODAL_SECRET" \
+    -o upscaled.png
 ```
 
-To choose a different GPU at deploy time, set `MODAL_GPU`:
+The output is deleted from the Volume once it has been downloaded, so a second request returns
+410. A failed job's files are deleted when it fails. Errors return JSON with a `detail`
+message: 400 for invalid parameters, 404 when the result has expired, 500 when upscaling
+failed.
+
+Health check (returns 401 without the headers):
 
 ```bash
-MODAL_GPU=RTX-PRO-6000 modal deploy modal_app.py
+curl "$ENDPOINT/health" -H "Modal-Key: $MODAL_KEY" -H "Modal-Secret: $MODAL_SECRET"
 ```
 
-GPU guidance, from testing on this app:
+## Deploy settings
 
-- **`RTX-PRO-6000` (default, recommended).** Verified working end to end, and the only
-  Modal GPU with 9th-gen NVENC.
-- **B200 / B300.** Data-center Blackwell has **no NVENC engine at all**, so video would
-  CPU-encode at the highest GPU price on the platform.
-- **A100.** No NVENC either.
-- **L40S and older.** Not verified for super-resolution here. Any GPU still needs the
-  `libnvidia-ngx` fix described above, and older torch wheels lack Blackwell kernels —
-  the pinned `torch==2.13.0` is required for `RTX-PRO-6000` (sm_120).
-
-### Deploy-time tuning knobs
-
-These are read when the container image is built and **baked into it**. Setting one in your
-shell at request time does nothing — it must be present on the `modal deploy` command:
+These environment variables are read when the image is built and baked into it. Setting one
+in your shell later does nothing; it must be on the `modal deploy` command line. The worker
+prints the resolved values at startup (`Selected video encoder: … preset=p5, cq=20, …`), which
+is the quickest way to check.
 
 | Variable | Default | Effect |
 |---|---|---|
-| `MODAL_GPU_ENCODER` | `1` | Encode from CUDA memory. `0` pipes rawvideo to ffmpeg instead. |
-| `MODAL_GPU_DECODER` | `1` | Decode in-process with NVDEC. `0` uses a decode subprocess. |
-| `MODAL_NVENC_PRESET` | `p5` | NVENC preset, `p1`–`p7`. |
-| `MODAL_NVENC_CQ` | `20` | Quality target, equivalent to NVEncC `--qvbr`. Lower is higher quality and larger files. |
+| `MODAL_NVENC_CQ` | `20` | Quality target, equivalent to NVEncC `--qvbr`. Lower means higher quality and larger files. |
+| `MODAL_NVENC_PRESET` | `p5` | NVENC preset, `p1` to `p7`. |
 | `MODAL_NVENC_MULTIPASS` | `fullres` | `qres` = 2pass-quarter, `fullres` = 2pass-full. |
 | `MODAL_NVENC_TUNING` | `uhq` | `uhq` or `hq`. UHQ is slower and better per bit. |
-| `MODAL_NVENC_LEVEL` | `5.1` | HEVC level for outputs up to 4096x2176. Set explicitly so the driver cannot pick one per session. Empty = driver picks. |
-| `MODAL_NVENC_MAX_MBPS` | `100` | VBR ceiling in Mbit/s, with a 1-second VBV buffer. `0` skips it and leaves the driver's default ceiling, which caps CQ (see above). |
-| `MODAL_NVENC_AQ_STRENGTH` | `10` | Adaptive quantisation strength, 1–15. |
-| `MODAL_NVENC_BFRAMES` | `5` | B-frames per GOP. |
-| `MODAL_NVENC_REFS` | `5` | Reference frames for the piped ffmpeg encoder (`-refs`). The GPU encoder leaves reference lists to the driver. |
+| `MODAL_NVENC_LEVEL` | `5.1` | HEVC level for outputs up to 4096x2176. Empty lets the driver pick. |
+| `MODAL_NVENC_MAX_MBPS` | `100` | VBR ceiling in Mbit/s with a 1 s buffer. `0` leaves the driver's ceiling, which caps CQ. |
+| `MODAL_NVENC_AQ_STRENGTH` | `10` | Adaptive quantisation strength, 1 to 15. |
+| `MODAL_NVENC_BFRAMES` | `5` | B-frames. |
+| `MODAL_NVENC_REFS` | `5` | Reference frames, piped ffmpeg encoder only. |
+| `MODAL_NVENC_SESSIONS` | `4` | Parallel encoder sessions on the segmented path. |
+| `MODAL_SEGMENT_SECONDS`, `MODAL_SEGMENTED_MIN_SECONDS` | `30`, `30` | Segment length, and the input length from which the segmented path is used. |
+| `MODAL_GPU_ENCODER` | `1` | Encode from GPU memory. `0` pipes frames to ffmpeg instead. |
+| `MODAL_GPU_DECODER` | `1` | Decode in-process with NVDEC. `0` uses a decode subprocess. |
 | `MODAL_GPU` | `RTX-PRO-6000` | Worker GPU type. |
-| `MODAL_APP_NAME` | `rtx-media-upscaler` | Deploy a variant beside production instead of replacing it. |
+| `MODAL_WORKER_CPU` | `6` | Worker CPU cores. Measured faster than 12. |
+| `MODAL_WORKER_MAX_CONTAINERS` | `0` (no cap) | Cap on worker containers. |
+| `MODAL_APP_NAME` | `rtx-media-upscaler` | Deploy a variant beside the main app instead of replacing it. |
 
-To benchmark a variant without disturbing production, give it its own app name and stop it
-when finished:
+To run a second configuration, give it its own app name. Both apps share the job Volume:
 
 ```bash
-MODAL_APP_NAME=rtx-bench MODAL_NVENC_PRESET=p6 modal deploy modal_app.py
-modal app stop rtx-bench -y
+MODAL_APP_NAME=rtx-media-upscaler-cq24 MODAL_NVENC_CQ=24 modal deploy modal_app.py
+modal app stop rtx-media-upscaler-cq24 -y    # when you no longer need it
 ```
 
-After deploy, Modal prints a URL similar to:
+`MODAL_WORKER_CONCURRENCY` exists but is not safe above 1 yet; CLAUDE.md explains why.
 
-`https://<workspace>--rtx-media-upscaler-api.modal.run`
+## Choosing a GPU
 
-## Choosing a Quality Mode
+NVENC is a separate hardware engine from the CUDA cores, and several Modal GPUs have none:
 
-`nvvfx.VideoSuperRes.QualityLevel` groups its models into four families. All 19 were probed
-working on `RTX-PRO-6000` with driver 580.95.05. They split into two roles:
-
-| Parameter | Accepted values | What it does |
+| GPU | NVENC | Usable |
 |---|---|---|
-| `quality` | `BICUBIC`, `LOW`, `MEDIUM`, `HIGH`, `ULTRA` | Upscale. Also suppresses compression artifacts, so it softens already-clean sources. |
-| `quality` | `HIGHBITRATE_LOW` … `HIGHBITRATE_ULTRA` | Upscale for clean/high-bitrate sources (ProRes, high-quality H.265). Skips artifact suppression. |
-| `preprocess` | `DENOISE_LOW` … `DENOISE_ULTRA` | Optional same-resolution pass before upscaling. Removes macro-blocking and mosquito noise. |
-| `preprocess` | `DEBLUR_LOW` … `DEBLUR_ULTRA` | Optional same-resolution pass before upscaling. Sharpens soft or out-of-focus footage. |
+| RTX PRO 6000 (Blackwell) | Yes, 9th generation, 4 engines | Yes, the default |
+| L40S | Yes | Yes, but slower per dollar |
+| H100, H200, A100, B200, B300 | **None** | No: video falls back to CPU `libx264` |
 
-The two roles are validated separately: a same-resolution mode in `quality` (or an upscaling
-mode in `preprocess`) is rejected with `400` before any GPU work starts.
+A GPU without NVENC still produces correct output, but encodes on the CPU at roughly a tenth
+of the speed, so a pricier card buys less throughput. Compare GPUs by cost per frame, not by
+fps or price per second. On the older pipeline the L40S gave 56% of the throughput for 72% of
+the cost. Before you benchmark another GPU, read
+[docs/PERF-HISTORY.md](docs/PERF-HISTORY.md) and the benchmark rules in
+[CLAUDE.md](CLAUDE.md).
 
-**Why the default is `HIGHBITRATE_ULTRA`, not `ULTRA`.** The standard family (`LOW`–`ULTRA`)
-suppresses compression artifacts as part of upscaling. That helps a genuinely artifact-heavy
-encode, but on a source that is *soft yet cleanly encoded* — the common case for broadcast
-archive material — there are no real artifacts to remove, so the pass chews on genuine
-texture and leaves a blotchy, painterly look. Measured on the reference clip, mode 19 beat
-mode 4 on **both** axes at once: ~15% more edge detail and roughly 8x less flat-region noise.
-Reach for `ULTRA` only when the source really is a heavily compressed, blocky encode.
+The GPU choice also fixes the torch version. Blackwell is `sm_120` and needs
+`torch==2.13.0`; torch 2.6 fails there with "no kernel image is available".
 
-**When `preprocess` earns its cost.** It adds a second inference pass per frame, so use it
-only when the source is the limiting factor. Measured behaviour on a soft, already-upscaled
-SD master, all paired with `HIGHBITRATE_ULTRA`:
+## How it works
 
-| Preprocess | Edge detail | Flat-region noise | Temporal flicker |
-|---|---|---|---|
-| none | 3.7 | 0.10 | 1.89 (baseline) |
-| `DEBLUR_LOW` | 6.5 | 0.11 | +22% |
-| `DEBLUR_MEDIUM` | 6.6 | 0.12 | +18% |
-| `DEBLUR_HIGH` | 5.9 | 0.12 | +12% |
-| `DEBLUR_ULTRA` | 5.6 | 0.09 | +5% |
-
-Two things here are worth internalising, because neither matches what the mode names imply:
-
-- **Intensity is not monotonic.** `DEBLUR_LOW`/`MEDIUM` produce *more* apparent detail than
-  `HIGH`/`ULTRA`, not less. The higher rungs appear to regularise more heavily alongside the
-  sharpening. Do not assume "ULTRA = strongest".
-- **Judge deblur on temporal flicker, not on stills.** Flat-region noise that changes frame to
-  frame is far more objectionable in motion than in a screenshot. `DEBLUR_ULTRA` is the
-  best-behaved rung for video: it still lifts detail by ~50% over no preprocess while adding
-  only 5% flicker, whereas `DEBLUR_LOW` wins on paper and shimmers the most.
-
-Default to no preprocess. If a soft source needs more bite, start at `DEBLUR_ULTRA` and
-**check the result in motion** before committing to a batch run.
-
-```bash
-python modal_client.py \
-	--endpoint "https://<workspace>--rtx-media-upscaler-api.modal.run" \
-	--input ./soft_broadcast_source.mkv \
-	--scale 2.0 --quality HIGHBITRATE_ULTRA --preprocess DEBLUR_ULTRA
+```
+client ──upload──▶ api (CPU, FastAPI) ──spawn──▶ UpscaleWorker (GPU)
+   ▲                  │  Volume API                 │ NVDEC → VSR → NVENC
+   └──download────────┴──── rtx-upscaler-jobs ◀─────┘  (frames stay in GPU memory)
 ```
 
-### Effect strength
+- **Web tier (`api`).** A CPU-only FastAPI app, so GPU time is billed only while frames are
+  being upscaled. It writes the upload to the `rtx-upscaler-jobs` Modal Volume through the
+  Volume API, without mounting it, spawns the GPU job, and streams the finished file back.
+  One container handles up to 20 concurrent requests.
+- **Job queue.** Modal web endpoints time out after 150 seconds, and video jobs run far
+  longer. `POST /upscale` therefore returns a `call_id` at once, and `GET /result/{call_id}`
+  returns 202 until the file is ready.
+- **GPU worker (`UpscaleWorker`).** Its `@modal.enter()` warms CUDA and probes the encoder once
+  per container. The VSR model stays loaded between jobs that share quality and output size.
+- **GPU-resident video path.** NVDEC decodes into CUDA memory, VSR runs on the decoded tensor,
+  and NVENC encodes straight from GPU memory. Removing the host round-trips between stages was
+  the largest single speed-up in the project's history (12 to 59 fps).
+- **Segmented encode.** Long inputs are split at keyframes and encoded on all four NVENC
+  engines at once (see [Speed](#speed)).
 
-`strength` (0.0-1.0, default 1.0) is the SDK's own effect strength for the upscale, and
-`preprocess_strength` the same for the `preprocess` pass. Lower values blend the model's
-effect back towards a plain resample. It works in all four families. On a 1080p web-encode
-still at 2x (mean absolute Laplacian, a detail measure; a plain `BICUBIC` upscale is 1.01):
+Everything is in two files: `modal_app.py` (the web tier and the GPU worker) and
+`modal_client.py` (the local client). `scripts/` holds standalone GPU probes and quality
+tools; [CLAUDE.md](CLAUDE.md) lists what each one is for.
 
-| Mode | strength 1.0 | 0.5 | 0.0 |
-|---|---|---|---|
-| `ULTRA` | 2.98 | 1.78 | 1.24 |
-| `HIGHBITRATE_ULTRA` | 2.40 | 1.68 | — |
-| `HIGHBITRATE_ULTRA` + `DENOISE_MEDIUM` preprocess | 1.59 | 1.86 | 2.40 (no preprocess) |
-| `HIGHBITRATE_ULTRA` + `DEBLUR_ULTRA` preprocess | 3.48 | 2.52 | 2.40 (no preprocess) |
+## Three pins that are easy to break
 
-These are detail figures from one still. Noise and flicker in motion were not measured,
-and CLAUDE.md explains why still-frame sharpness alone misleads, so judge a short clip in
-motion before a batch run. At 1.0 the SDK call is the one this service always made; a
-default image job was byte-identical before and after the change.
+All three live in `modal_app.py`. Read this before you change the image.
 
-```bash
-python modal_client.py \
-	--endpoint "https://<workspace>--rtx-media-upscaler-api.modal.run" \
-	--input ./web_encode.mkv \
-	--scale 2.0 --quality ULTRA --strength 0.6 --container mkv --truehdr
+**1. The NGX driver library (`DRIVER_VERSION`).** RTX VSR is an NGX feature. The `nvidia-vfx`
+wheel loads the driver-side `libnvidia-ngx.so.1` at runtime, and Modal's container runtime
+does not provide that library. Without it, `NvVFX_Load` fails on every GPU type:
+
+```
+NvVFX_Load failed: The effect has not been properly initialized (code -12)
 ```
 
-## Comparing Results
+So the image installs that one library from the matching NVIDIA driver package.
+`DRIVER_VERSION` should track the host driver from `nvidia-smi`, and the worker logs a warning
+at startup when they differ. The image pins `580.95.05`. On 2026-11-25 Modal's containers ran
+on `610.57.04` and `620.70.06`, none on 580; VSR and TrueHDR still load with the 580 library,
+so the warning fires at every start. The pin stays because containers land on hosts with
+different drivers and no single value matches all of them.
 
-`scripts/compare_frames.py` builds side-by-side comparison images from an input and an output
-file, matching frames by index rather than timestamp:
+**2. The ffmpeg build (`FFMPEG_URL`).** Each ffmpeg build links an NVIDIA Video Codec SDK with
+a minimum driver version:
+
+| ffmpeg build | Video Codec SDK | Requires driver | Usable here |
+|---|---|---|---|
+| BtbN `master-latest` | 13.1.15 | 610.0+ | No: NVENC silently unavailable |
+| BtbN `n8.1` (pinned) | 570-compatible | 570.0+ | Yes, including `av1_nvenc` |
+| Debian apt ffmpeg 5.1 | | | Yes, but no `av1_nvenc` |
+
+With `master-latest`, every NVENC encoder fails to initialise and the worker falls back to CPU
+`libx264`: correct output, roughly a tenth of the speed. The pin is a month-end BtbN release
+with a SHA-256 check, because BtbN rebuilds its `latest` tags daily. The table was measured on
+580 hosts; newer hosts meet `master-latest`'s requirement, but the fleet is mixed and that
+build has not been re-tested.
+
+**3. mkvmerge (`MKVTOOLNIX_VERSION`).** Matroska output uses `mkvmerge` 104 from the
+MKVToolNix author's apt repository, pinned by version, with the repository key checked by
+hash. Debian bookworm's own v74 does not see mp4 timed-text subtitles and drops them without
+an error.
+
+## Limits and guarantees
+
+- **Upscaling only.** `scale` must be at least 1.0, and a target smaller than the input is
+  rejected with `400`.
+- **Output dimensions** are rounded to multiples of 8 (minimum 8). In `target dimensions`
+  mode the output fits inside the box unless you pass `--no-keep-aspect-ratio`.
+- **Maximum output edge: 16384 pixels.** Larger requests are rejected with `400` before any
+  GPU work. The SDK corrupts output at 16K (the blue channel collapses to 0), so between 15360
+  and 16384 the worker runs VSR at 15360 and resamples the rest of the way with GPU bicubic
+  interpolation.
+- **Every frame is checked on the GPU** for non-finite values and channel collapse, so corrupt
+  SDK output fails the job instead of reaching your file.
+- **Fallbacks are never silent.** If the GPU decoder or encoder cannot be used, the worker
+  falls back and logs a warning that names the cause.
+- **One job per worker container.** Modal scales out with more containers instead.
+- Resize types, the quality mapping, the multiple-of-8 alignment and the
+  `MAX_PIXELS = 1024 * 1024 * 16` batching heuristic come from the ComfyUI node this project
+  started as. They are part of the API contract.
+
+## Troubleshooting
+
+| Symptom | Cause and fix |
+|---|---|
+| `NvVFX_Load failed … (code -12)` | The NGX library does not match the host driver. Set `DRIVER_VERSION` to the driver the error names and redeploy. It is not a GPU-model problem. |
+| The log says `Selected video encoder: libx264` | NVENC is unavailable: a GPU without NVENC, or an ffmpeg build that needs a newer driver. Output is correct but about ten times slower. |
+| `no kernel image is available for execution on the device` | torch is too old for the GPU. Blackwell needs `torch==2.13.0`. |
+| `401` from every endpoint | Missing or wrong `Modal-Key` / `Modal-Secret` headers. |
+| `410` from `/result` | The file was already downloaded; outputs are deleted after the first download. |
+| A deploy setting has no effect | It was set in the shell after the deploy. Put it on the `modal deploy` command and check the worker's startup line. |
+| The output looks no sharper than a Lanczos resize | The source may be an upscaled SD master. See the 540p check in [Choosing a quality mode](#choosing-a-quality-mode). |
+| `NVENC CreateEncoder returned error 8 (intermittent) … retrying` | Expected now and then; the worker retries. A `WARNING: NVENC rejected explicit HEVC level` means the retries ran out and the driver's level was used. |
+
+## Comparing results and measuring
+
+`scripts/compare_frames.py` builds side-by-side images from an input and an output, matching
+frames by index:
 
 ```bash
 uv run --with pillow --with numpy python scripts/compare_frames.py \
-	--original ./input.mkv --upscaled ./output.mp4
+    --original ./input.mkv --upscaled ./output.mp4
 ```
 
-For each frame it writes a full-frame comparison, a centre-crop (where differences are
-actually visible at screen zoom), and an amplified difference map showing which pixels the
-upscaler changed. The original side is Lanczos-resized to match dimensions and labelled as
-such, so the comparison is against the strongest conventional resampler rather than a
-flattering baseline.
+For each frame it writes a full-frame comparison, a centre crop (where differences show at
+screen zoom), and an amplified difference map. The original side is Lanczos-resized to the
+output size and labelled as such, so you compare against the best conventional resampler.
 
-## Upload and Download From Local Machine
+If you benchmark settings or GPUs:
 
-```bash
-python modal_client.py \
-	--endpoint "https://<workspace>--rtx-media-upscaler-api.modal.run" \
-	--input ./input.mp4 \
-	--resize-type "scale by multiplier" \
-	--scale 2.0 \
-	--quality ULTRA
-```
+1. **Compare warm containers only.** The same configuration measured 8.0 fps cold and 12 fps
+   warm on a 12-second clip. Run the clip three or four times in one container and read the
+   later runs.
+2. **Deploy the variant beside the main app** with its own `MODAL_APP_NAME`, and set
+   `MODAL_WORKER_MAX_CONTAINERS=1` so the autoscaler does not spread the runs over
+   containers.
+3. **Use real content.** On synthetic noise the `cq` response measured inverted.
+4. **Check pixels, not only metadata.** For a full day this pipeline produced visibly striped
+   4K that passed frame count, `ffprobe`, a clean decode and the built-in integrity check. Two
+   cheap checks catch it: count frames whose standard deviation is above 1 (fewer than the
+   frame count means flat grey frames), and take the mean absolute Laplacian of a 512-pixel
+   crop (about 1 to 3 on the reference clip; about 190 means column striping).
+   `scripts/probe_p010_encode.py` runs both on a synthetic clip.
+5. **Compute cost per frame**, from Modal's current per-second price for the GPU plus the CPU
+   and memory you requested.
 
-Or target exact output dimensions:
+The full verification protocol for code changes is in [CLAUDE.md](CLAUDE.md).
 
-```bash
-python modal_client.py \
-	--endpoint "https://<workspace>--rtx-media-upscaler-api.modal.run" \
-	--input ./input.png \
-	--resize-type "target dimensions" \
-	--width 1920 \
-	--height 1080 \
-	--quality HIGH
-```
+## Using this as a template
 
-The client submits the job, polls until the worker finishes, and saves the output locally (`*_upscaled.png`, `*_upscaled.mp4`, or `*_upscaled.mkv` with `--container mkv`) unless `--output` is provided. Tune the wait with `--timeout` and `--poll-interval`. Transient network errors and proxy 502/503/504 answers are retried with backoff. If the client stops anyway, resume the same job with `--call-id <call_id>` (printed at submit time) instead of uploading again. The download goes to `<output>.part` and is renamed only when its size matches `Content-Length`.
+Only the upscaling logic is specific to this project. Keep these for any Modal GPU service:
 
-## Direct API Usage
+- The CPU web tier and GPU worker split, so GPU time is billed only for GPU work.
+- The job-queue API, which avoids the 150-second limit on web endpoints.
+- The `modal.Volume` file handoff: the web tier uses the Volume API (`batch_upload`,
+  `read_file`, `remove_file`) and only the GPU worker mounts the Volume.
+- `requires_proxy_auth=True` and the client's submit-and-poll loop.
+- `@modal.enter()` for anything expensive to initialise.
 
-Submit a job (returns a `call_id`):
+Replace `UpscaleWorker._upscale_image` / `_upscale_video` and the `nvvfx` calls. Drop the
+`DRIVER_VERSION` / `libnvidia-ngx` install unless the new job also uses an NGX feature. Keep
+the ffmpeg pin only if the job encodes video, and re-verify NVENC against the host driver of
+the day. Rename the app (`rtx-media-upscaler`) and the Volume (`rtx-upscaler-jobs`), or the new
+service will collide with this one in the same workspace.
 
-```bash
-curl -X POST "https://<workspace>--rtx-media-upscaler-api.modal.run/upscale" \
-	-H "Modal-Key: $MODAL_KEY" -H "Modal-Secret: $MODAL_SECRET" \
-	-F "file=@./input.png" \
-	-F "resize_type=scale by multiplier" \
-	-F "scale=2.0" \
-	-F "quality=ULTRA"
-```
+## License and credits
 
-For HDR10 video output add `-F "truehdr=on"` (or a `contrast=…,maxluminance=…` list), and
-optionally `-F "master_display=G(…)B(…)R(…)WP(…)L(…,…)"` and `-F "max_cll=680,300"`
-(without `max_cll`, the measured values are written). `-F "container=mkv"` selects the
-Matroska output, and `-F "strength=0.6"` / `-F "preprocess_strength=0.5"` set the effect
-strength.
+The code in this repository is licensed under the [Apache License 2.0](LICENSE).
 
-Poll for the result. While the job runs this returns HTTP 202; on completion it returns the file:
+It started as a port of the Comfy-Org ComfyUI RTX node and also draws on
+`whmc76/ComfyUI-NVIDIA-RTX-VSR-Pro`; both are Apache-2.0 and credited in [NOTICE](NOTICE).
 
-```bash
-curl "https://<workspace>--rtx-media-upscaler-api.modal.run/result/fc-XXX" \
-	-H "Modal-Key: $MODAL_KEY" -H "Modal-Secret: $MODAL_SECRET" \
-	-o upscaled.png
-```
-
-The output is deleted from the Volume once it has been downloaded; a second request returns 410. A failed job's files are deleted when it fails. Errors return JSON with a `detail` message: 400 for invalid parameters, 404 when the result has expired, 500 when upscaling failed.
-
-Health check:
-
-```bash
-curl "https://<workspace>--rtx-media-upscaler-api.modal.run/health" \
-	-H "Modal-Key: $MODAL_KEY" -H "Modal-Secret: $MODAL_SECRET"
-```
-
-## Using This as a Template for Other Modal Jobs
-
-The structure here is deliberately generic; only the upscaling logic is domain-specific.
-
-**Keep** — these solve problems any Modal GPU service hits:
-
-- The CPU web tier / GPU worker split, so GPU time is billed only for GPU work.
-- The job-queue API, which sidesteps the 150-second HTTP limit on web endpoints.
-- The `modal.Volume` file handoff: the web tier uses the Volume API (`batch_upload`, `read_file`, `remove_file`), only the GPU worker mounts it.
-- `requires_proxy_auth=True`, plus the client’s submit-and-poll loop.
-- `@modal.enter()` warming for anything expensive to initialise.
-
-**Replace** — `UpscaleWorker._upscale_image` / `_upscale_video` and the `nvvfx` calls.
-
-**Reconsider per job:**
-
-- The `DRIVER_VERSION` / `libnvidia-ngx` install is only needed for NGX features such as
-  super-resolution. Most GPU jobs can drop it entirely.
-- The pinned ffmpeg build matters only if the job encodes video — and re-verify NVENC
-  against the host driver of the day, since that pairing is what breaks.
-- Rename the app (`rtx-media-upscaler`) and the Volume (`rtx-upscaler-jobs`), or a new
-  service will collide with this one in the same workspace.
-
-## Compatibility Notes
-
-- The runtime contract is HTTP upload/download.
-- Video output is encoded with NVENC HEVC/H.264 when the GPU encoder is available (falling back to `libx264`), and **every** source audio track is kept. Each track is stream-copied when mp4 can carry its codec (AAC, AC-3, E-AC-3, Opus, ALAC, MP3, FLAC); any other codec (DTS, TrueHD, PCM, ...) is re-encoded to AAC 192k for that track only, with a warning in the worker log. (Before 2026-10-03 only the first audio track was kept, and the GPU-encoder path always re-encoded it to AAC.) With `container=mkv` nothing is re-encoded: every audio and subtitle track, the chapters and the attachments are copied from the source as they are.
+The image build downloads NVIDIA software that this repository does not contain or
+redistribute: the `nvidia-vfx` and `PyNvVideoCodec` wheels from PyPI, and one library from
+NVIDIA's Linux driver package. Those components are under NVIDIA's own license terms, which
+you accept when you build the image. The same applies to the BtbN ffmpeg build and to
+MKVToolNix under their licenses.

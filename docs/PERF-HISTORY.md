@@ -12,7 +12,7 @@ in the current one.
 
 ---
 
-## The piped era (historical) — measured 2026-08-16
+## The piped era (historical): measured 2026-08-16
 
 Measured on `RTX-PRO-6000`, 1080p→4K, `HIGHBITRATE_ULTRA`, 62 s / 1552-frame
 clip. Each stage runs about as fast as the others, so they only pay for themselves once if
@@ -22,17 +22,17 @@ they run at the same time:
 |---|---|
 | CPU decode (`cv2.VideoCapture`), serialized infer→encode | 9.7 |
 | + NVDEC decode on a reader thread, writer thread for the encoder | 11.9 |
-| + `cpu=12` (was 4) | 13.1 (12.5 on repeat) — superseded, see below |
-| preset `p5` instead of `p6` | 12.1 — *slower*, i.e. within noise |
+| + `cpu=12` (was 4) | 13.1 (12.5 on repeat); superseded, see below |
+| preset `p5` instead of `p6` | 12.1, *slower*, i.e. within noise |
 
 The takeaways, so nobody re-runs these experiments:
 
 - **Decode is free now**: `decode-wait 0%`. Do not spend effort there.
 - **The encoder preset is not the lever.** Standalone (nothing else on the GPU),
-  `hevc_nvenc` at p6+uhq+fullres does 18.6 fps at 4K and p4 does 35 fps — but in situ p5
+  `hevc_nvenc` at p6+uhq+fullres does 18.6 fps at 4K and p4 does 35 fps, but in situ p5
   measured *slower* than p6. What binds is the GPU being shared between VSR inference and
   NVENC, not encoder settings, so keep p6 and take the quality. **Superseded for the
-  default:** the preset is now `p4` to match the reference NVEncC command — see the
+  default:** the preset is now `p4` to match the reference NVEncC command; see the
   fully-GPU-resident section below. The finding still holds *for the piped path*, where
   preset choice buys nothing.
 - **The bt709 color filter is free**: 18.6 fps with it vs 18.0 without. Never drop it for
@@ -40,17 +40,17 @@ The takeaways, so nobody re-runs these experiments:
 - Every job prints a `Video done: … fps (decode-wait …, infer …, encode-backpressure …)`
   line. Compare against the table above before believing a change helped.
 - **Compare warm containers only.** On a 12 s clip the same config measures 8.0 fps cold
-  and 12 fps warm — the effect load is paid once per container. Run the clip 3-4 times
+  and 12 fps warm: the effect load is paid once per container. Run the clip 3-4 times
   back to back in one process and read the later runs, or you will "measure" cold starts.
 
-## GPU choice and `cpu=` — settled 2026-08-18 **on the piped path**; re-derive before reusing
+## GPU choice and `cpu=`: settled 2026-08-18 **on the piped path**; re-derive before reusing
 
 **Read this before the next GPU benchmark.** The table below was measured when the
 pipeline ran at 12 fps and was bound by contention between three processes. The current
 path is fully GPU-resident and bound by *inference* (`infer 74%`, encode 11%). The
 conclusion may still hold, but the numbers no longer describe the running system, so
 **re-derive every row before quoting it**. What does not need re-deriving is the NVENC
-engine count — that is a hardware fact, and it is what makes most Modal GPUs unusable here.
+engine count. That is a hardware fact, and it is what makes most Modal GPUs unusable here.
 
 Method for the re-run, so results are comparable:
 
@@ -80,7 +80,7 @@ Historical table (piped path, 302-frame clip, 1080p→4K, `HIGHBITRATE_ULTRA`, w
 | L40S, `cpu=12` | 6.8 | 0.000753 | 0.0001107 |
 
 - **The GPU question was closed on the piped path: keep `RTX-PRO-6000`.** It is the only Modal GPU with
-  9th-gen NVENC, and H100/H200/A100/B200/B300 have **zero** NVENC engines — paying more
+  9th-gen NVENC, and H100/H200/A100/B200/B300 have **zero** NVENC engines, so paying more
   buys less. L40S is the only credible alternative and it loses on *both* axes: 56% of the
   throughput for 72% of the cost. It needed ≥71.5% of RTX throughput just to break even.
   L40S is not broken (NGX loads, `hevc_nvenc` selected, `nvdec=yes`); it is inference-bound
@@ -90,7 +90,7 @@ Historical table (piped path, 302-frame clip, 1080p→4K, `HIGHBITRATE_ULTRA`, w
   `decode-wait 1%`. `cpu=6` is the default, keeping margin for larger outputs where swscale
   work scales with pixel count. Re-measure before going below 6.
 
-## Where the 12 fps actually goes (historical, piped path) — probed 2026-08-18
+## Where the 12 fps actually goes (historical, piped path): probed 2026-08-18
 
 "Consumer RTX VSR runs realtime on cheap GPUs" is true and is **not** in tension with our
 12 fps. Each stage was measured in isolation on `RTX-PRO-6000`, 1080p→4K:
@@ -100,7 +100,7 @@ Historical table (piped path, 302-frame clip, 1080p→4K, `HIGHBITRATE_ULTRA`, w
 | VSR `run()`, GPU-resident, HIGHBITRATE_ULTRA | **310** |
 | + mandatory `.clone()` + integrity check | 262 |
 | + CPU→GPU upload and GPU→CPU download | **103** |
-| bt709 color filter (vs no filter) | 214 vs 215 — **free** |
+| bt709 color filter (vs no filter) | 214 vs 215, **free** |
 | Python→pipe→ffmpeg, no encode | 159 (≈4 GB/s) |
 | `hevc_nvenc` with production args, alone | **19.5** |
 | NVDEC decode | free (`decode-wait` 1%) |
@@ -111,20 +111,20 @@ Historical table (piped path, 302-frame clip, 1080p→4K, `HIGHBITRATE_ULTRA`, w
   decode→VSR→*screen*, fully GPU-resident, with no encode and no host round-trips. We
   additionally write an archival 4K 10-bit HEVC file, which alone is a ~19.5 fps job.
 - **Neither is the encoder's compute, which is the counter-intuitive part.** Standalone the
-  NVENC preset is a huge lever (p6 21 fps, p5 31, p4 38.5, p4+qres 43 — `-multipass`, AQ
+  NVENC preset is a huge lever (p6 21 fps, p5 31, p4 38.5, p4+qres 43; `-multipass`, AQ
   and `-rc-lookahead` are all minor by comparison). **In situ every one of them measures
-  12.0-12.6 fps — no change at all.** p4+`-multipass qres` is 2.05x faster standalone and
+  12.0-12.6 fps, no change at all.** p4+`-multipass qres` is 2.05x faster standalone and
   gains nothing end-to-end. So do not "optimize" the encoder settings for speed; you would
   trade away quality for zero throughput. This confirms the older p5-vs-p6 note. All of
   this is about the **piped** path; once the frames stop crossing process boundaries the
   contention disappears and the picture changes completely (see below).
 - **What binds is contention, not any single stage.** In-pipeline the inference stage runs
-  at ~21 fps against 103 fps standalone — a 5x inflation from sharing the box with two
+  at ~21 fps against 103 fps standalone, a 5x inflation from sharing the box with two
   ffmpeg processes and ~31 MB of raw frames per frame (6.2 MB in + 24.9 MB out) crossing
   process boundaries. Every stage is fast alone; together they are ~4x slower.
 - **Therefore the only real lever left is architectural**: keep frames on the GPU end to
   end (NVDEC→CUDA→VSR→NVENC, no host round-trip, no rawvideo pipes). Ceiling for that is
-  the NVENC ASIC, so expect ~19 fps at current settings — worth roughly 1.6x, not 10x. Do
+  the NVENC ASIC, so expect ~19 fps at current settings, worth roughly 1.6x, not 10x. Do
   not attempt it expecting realtime.
 - Quality rungs *do* change inference cost a lot (SDK-only: HIGHBITRATE_ULTRA 310 fps,
   ULTRA 431, HIGHBITRATE_LOW/LOW ~1235), but since inference is not binding, dropping
@@ -132,41 +132,41 @@ Historical table (piped path, 302-frame clip, 1080p→4K, `HIGHBITRATE_ULTRA`, w
 
 Every `MODAL_NVENC_*` knob (`PRESET`, `MULTIPASS`, `CQ`, `AQ_STRENGTH`, `BFRAMES`, `REFS`,
 `SFE`) plus `MODAL_GPU_ENCODER` / `MODAL_GPU_DECODER` exists for re-testing this. **They
-must be baked into the image with `.env()`** — they are read again at container import,
+must be baked into the image with `.env()`**: they are read again at container import,
 where the deploying shell's environment does not exist, so a bare
 `MODAL_NVENC_PRESET=p4 modal deploy` silently measures the default. Anything added to the
 constants must also be added to the `.env({...})` block, or it will appear to do nothing.
 Verify any such knob took effect by deploying a deliberately invalid value once and
-confirming it fails loudly — and note the worker prints the resolved encoder settings at
+confirming it fails loudly, and note that the worker prints the resolved encoder settings at
 startup (`Selected video encoder: … preset=p4, cq=18, …`), which is the cheapest check.
 
-## Step 1 — feed NVENC from CUDA memory (`MODAL_GPU_ENCODER`), 2.8x, measured 2026-08-18
+## Step 1: feed NVENC from CUDA memory (`MODAL_GPU_ENCODER`), 2.8x, measured 2026-08-18
 
 A consumer RTX 4070 running NVEncC does this same job (1080p→4K, NGX VSR, HEVC 10-bit,
-uhq) at ~50 fps. Its log shows why: `Input Buffers CUDA` — decode, VSR and NVENC all live
+uhq) at ~50 fps. Its log shows why: `Input Buffers CUDA`: decode, VSR and NVENC all live
 in GPU memory, and the only pipe carries *1080p* frames. Ours moved every **4K** frame
 GPU→host→pipe→ffmpeg→swscale→NVENC, ~31 MB per frame across three processes.
 
-**`NVEncC cannot be adopted on Linux` — but NVIDIA super-resolution itself runs fine
+**`NVEncC cannot be adopted on Linux`, but NVIDIA super-resolution itself runs fine
 there, so keep the two claims separate.** Re-verified 2026-08-18 against live `master`:
 `NVEncCore/rgy_version.h`'s non-WIN32 branch hard-defines `ENABLE_NVVFX 0` and
 `ENABLE_NVSDKNGX 0` with no `#ifndef` and no configure override, the official option docs
 say `nvvfx-superres` is "supported on x64 [Windows] version only", and the 7.15 release
 notes say "Windows x64 only". So `--vpp-resize algo=ngx-vsr` / `algo=nvvfx-superres` on
-Linux NVEncC is a dead end regardless of which SDKs are installed — do not retry it.
+Linux NVEncC is a dead end regardless of which SDKs are installed; do not retry it.
 
 What *does* work on Linux: the NGX RTX VSR effect we use via `nvidia-vfx` (the upstream
 node this service derives from documents "Windows or Linux", and this service is the
 proof), and separately NVIDIA's Maxine VFX SDK, which ships a native Linux package on NGC
 (`VFXSDK_linux_<ver>.tgz`, `nvvfxvideosuperres`, compute capability up to 12.0). Linux is a
-first-class target there — `install_feature.sh -f nvvfxvideosuperres`, supported GPUs
-include L4, VSR needs driver 570.190+/580.82+/590.44+ — and official Python bindings exist
+first-class target there (`install_feature.sh -f nvvfxvideosuperres`, supported GPUs
+include L4, VSR needs driver 570.190+/580.82+/590.44+), and official Python bindings exist
 (`nvidia-vfx`, samples at NVIDIA-Maxine/nvidia-vfx-python-samples).
 
 **Corrected 2026-08-18: Maxine is very likely the *same* model, not a different family.**
 An earlier note here claimed the `HIGHBITRATE_*` tuning would not carry over. The current
-Maxine VSR filter docs list modes 0-19 — `VSR_Bicubic/Low..Ultra`, `Denoise_*`, `Deblur_*`,
-`HighBitrate_Low..Ultra` — i.e. exactly the family this pipeline tunes against, over the
+Maxine VSR filter docs list modes 0-19 (`VSR_Bicubic/Low..Ultra`, `Denoise_*`, `Deblur_*`,
+`HighBitrate_Low..Ultra`), i.e. exactly the family this pipeline tunes against, over the
 same BGRA/RGBA GPU-buffer interface. So it reads as the same model delivered through the
 SDK instead of driver-side NGX. Nothing to do today (the NGX path works at ~59 fps), but it
 is the natural fallback if the `libnvidia-ngx.so.1` install in hard constraint #1 ever
@@ -201,12 +201,12 @@ Traps worth knowing before touching this path:
 - The muxer needs `encoder.GetSequenceParams()` as extradata or the mp4 has no usable
   sample entry.
 
-## Step 2 — fully GPU-resident (`MODAL_GPU_DECODER`) and the settled quality point, 2026-08-18
+## Step 2: fully GPU-resident (`MODAL_GPU_DECODER`) and the settled quality point, 2026-08-18
 
 **This is the current architecture.**
 
-Both knobs now **default to 1**. Step 1 shipped opt-in because three things were unresolved
-— the output bitrate was ~2x the piped path, `uhq` looked unsupported, and no quality
+Both knobs now **default to 1**. Step 1 shipped opt-in because three things were unresolved:
+the output bitrate was ~2x the piped path, `uhq` looked unsupported, and no quality
 comparison was possible while frame counts disagreed. All three are closed below, and the
 last host round-trip (the decode pipe) is gone: NVDEC decodes in-process, so a frame is created in
 CUDA memory and never leaves it until NVENC emits a packet. Warm on the reference clip:
@@ -217,7 +217,7 @@ CUDA memory and never leaves it until NVENC emits a packet. Warm on the referenc
 | piped decode + GPU encode | 34.2 | 302 (over-counted) |
 | **in-process NVDEC + GPU encode (current)** | **57–60** | **301 of 301** |
 
-301 is the correct count — `ffprobe -count_frames` on the source says 301, so the piped
+301 is the correct count: `ffprobe -count_frames` on the source says 301, so the piped
 path's "302" was over-counting by one.
 
 **Two silently-wrong kwarg spellings caused blockers 1 and 2.** PyNvVideoCodec's option
@@ -225,19 +225,19 @@ parser drops unknown keys into a `map<string,string>` with **no validation**, so
 costs quality and raises nothing:
 
 - **`qp` is not a key at all.** The old `rc="vbr", qp="19"` therefore set no quality target
-  and ran plain VBR at the default bitrate — that, not a rate-control philosophy
+  and ran plain VBR at the default bitrate. That, not a rate-control philosophy
   difference, was the 2x bitrate gap. The correct key is **`cq`** (NVENC `targetQuality`),
   and it is monotonic in the right direction (measured, real content, 1080p: cq=14 → 7.79,
   18 → 7.44, 24 → 4.48, 32 → 1.60 Mbps).
 - **The uhq tuning value is `uhq`, not `ultra_high_quality`.** The long name falls through
   to UNDEFINED, which is exactly the error 8 that made uhq look unsupported here.
 
-Output at the settled settings: 12.7 Mbps — *below* the piped path's 19.9, not double it.
+Output at the settled settings: 12.7 Mbps, *below* the piped path's 19.9, not double it.
 
 The quality point mirrors NVEncC `--qvbr 18 --codec h265 --tune uhq --output-depth 10
 --profile main10 --tier high --multipass 2pass-quarter --aq --aq-strength 10 --bframes 5
 --ref 5` at preset P4. It lives in the `NVENC_*` module constants and **both** encode paths
-read it, so the piped fallback stays directly comparable. `main10` needs no kwarg — the
+read it, so the piped fallback stays directly comparable. `main10` needs no kwarg: the
 profile autoselects from the P010 input surface.
 
 **Verifying an encoder kwarg requires one session per process.** With several
@@ -245,12 +245,12 @@ profile autoselects from the P010 input surface.
 measured 17199 KiB and 7204 KiB on different runs, and every session after the first
 returned a byte-identical size no matter what changed. `scripts/probe_gpu_encoder.py` runs
 each variant in its own container (`single_use_containers`) for this reason. Also prefer
-**real content** — on synthetic noise the `cq` response measured *inverted*.
+**real content**: on synthetic noise the `cq` response measured *inverted*.
 
 **`ThreadedDecoder` is unusable in PyNvVideoCodec 2.2.0.** It drains after exactly one
 frame in every configuration probed: NATIVE/RGB/RGBP, every buffer and batch size, mkv and
-mp4. (An empty batch really does mean EOF — `SPSCBuffer::PopEntries` blocks until the batch
-is available and only returns short once the producer signalled done — so this is the
+mp4. (An empty batch really does mean EOF: `SPSCBuffer::PopEntries` blocks until the batch
+is available and only returns short once the producer signalled done, so this is the
 decode thread stopping, not a race.) `SimpleDecoder` and the low-level
 `CreateDemuxer` + `CreateDecoder` pair both deliver all 301 frames; `_upscale_video_gpu`
 uses the low-level pair, which matches sequential streaming use.
@@ -258,10 +258,10 @@ uses the low-level pair, which matches sequential streaming use.
 Decoder traps:
 
 - `outputColorType=OutputColorType.RGB` gives tightly packed **HWC uint8** with no pitch
-  padding, and converts on GPU using the bitstream's own `matrix_coefficients` — do not
+  padding, and converts on GPU using the bitstream's own `matrix_coefficients`; do not
   hand-roll BT.709 math for it.
 - **`.clone()` is mandatory**, same trap as nvvfx: the decoder recycles its surfaces on the
-  next `Decode()`. Measured — an uncloned view's mean changed under it while a clone held.
+  next `Decode()`. Measured: an uncloned view's mean changed under it while a clone held.
 - `torch.from_dlpack` works directly; the encoder-side positional-`__dlpack__` patch is not
   needed on the decode side.
 - Gate it on the existing `_nvdec_can_decode()` probe so unsupported inputs fall back to
@@ -270,22 +270,22 @@ Decoder traps:
 **This path is inference-bound, and `decode-wait` lies when decode is inline.** Run inline,
 in-process NVDEC reported `decode-wait 50%` despite being ~1675 fps standalone. Moving it
 to a reader thread changed the attribution to `decode-wait 1%, infer 74%` and the
-throughput **not at all** (5.1s either way) — the "wait" was overlapping GPU work, not a
+throughput **not at all** (5.1s either way); the "wait" was overlapping GPU work, not a
 stall. The thread is kept because the attribution is honest and it removes a real
 serialization risk at larger output sizes, but do not expect fps from it. The binding stage
 is now VSR inference; the encoder sits at 12%.
 
-**Batching does not pay — `MAX_BATCH = 1`, measured 2026-08-19.** Warm on the reference
+**Batching does not pay: `MAX_BATCH = 1`, measured 2026-08-19.** Warm on the reference
 clip, batch=1 measured **56.0 fps against batch=2's 53.2**. A larger batch makes the
 encoder wait on a longer run of inference instead of overlapping with it. The constant
-also pins the batch for a correctness reason — see the cross-stream DLPack race in the
-encoder-sync section below — so do not raise it for either speed or memory reasons without
+also pins the batch for a correctness reason (see the cross-stream DLPack race in the
+encoder-sync section below), so do not raise it for either speed or memory reasons without
 re-reading both.
 
-**Decoupled encode threading — evaluated 2026-08-18, declined.** Video Codec SDK 13.1
+**Decoupled encode threading: evaluated 2026-08-18, declined.** Video Codec SDK 13.1
 introduced a decoupled-queue architecture so NVDEC/CUDA/NVENC work on *different* frames
 concurrently, and the obvious suggestion is to apply it here: decode is already on a reader
-thread, but `_flush()` still encodes inline right after inference. The arithmetic kills it —
+thread, but `_flush()` still encodes inline right after inference. The arithmetic rules it out:
 encode is **12%** of wall time, so perfect overlap is worth at most ~1.14x (~59 → ~66 fps).
 Against that, a writer thread reintroduces packet-ordering and DLPack-buffer-lifetime
 hazards on the encoder side, and the reader-thread experiment directly above showed that
@@ -293,7 +293,7 @@ this kind of "wait" is often overlapping GPU work that threading does not recove
 Do not spend effort here; the lever is inference, and inference is the SDK's.
 ---
 
-## NVENC does not observe CUDA stream ordering — fixed 2026-08-19
+## NVENC does not observe CUDA stream ordering: fixed 2026-08-19
 
 The GPU encode path spent a day disabled because it emitted alternating-column striping on
 every frame (Laplacian ~192 over a 512px crop against ~1.1 piped and ~2.0 for the source;
@@ -312,16 +312,17 @@ frame. Fix is one `torch.cuda.synchronize()` before `Encode()`.
 Things that were *not* the cause, each disproved by probe, so nobody re-runs them: the
 `__dlpack__` shim, the flat-vs-per-plane surface handoff, the non-contiguous CHW→HWC
 tensor production feeds in, batching itself, and holding the P010 buffer alive (rings of
-8/48/64 all still corrupt — the race is against the kernels filling the buffer, not
+8/48/64 all still corrupt; the race is against the kernels filling the buffer, not
 against the allocator).
 
 **`scripts/probe_p010_encode.py` is the tool for this class of bug.** It encodes a smooth
 synthetic clip, muxes it exactly like production, decodes it back and reports the striping
 Laplacian and a stale-frame count, one encoder session per container. Variants I (freed
 temporary, production's old lifetime) and N (same plus the sync) are the before/after:
-22 corrupt frames of 30 versus 0. `scripts/probe_gpu_encoder.py` cannot see any of this —
+22 corrupt frames of 30 versus 0. `scripts/probe_gpu_encoder.py` cannot see any of this:
+it only watches the encoded size.
 
-## Encoder-bound, the hidden bitrate cap, and new defaults — measured 2026-10-03
+## Encoder-bound, the hidden bitrate cap, and new defaults: measured 2026-10-03
 
 Source: a BBC Blu-ray remux (H.264 MBAFF, `field_order=tt`, untagged colour, fine grain),
 1080p→4K, `HIGHBITRATE_ULTRA`, RTX PRO 6000 Blackwell Server Edition, driver 580.95.05.
@@ -395,7 +396,7 @@ on the 61 s sample: 35.7 fps warm, 78 Mbps, 1526/1526 frames, byte-identical acr
   settings (52 vs 59 fps). At the new defaults the encoder (~36 fps) is far below either
   decode path; the in-process path was not re-measured at those settings.
 
-### Production deploy failure and fix — 2026-10-03 (evening)
+### Production deploy failure and fix: 2026-10-03 (evening)
 
 The first production deploy of these defaults failed every video job with error 8 at
 `CreateEncoder`; production was restored by redeploying the previous `modal_app.py`
@@ -410,7 +411,7 @@ the fallback fired 4 times (those 4K outputs carried level 5.0 or 6.0, same ceil
 size). 1620p outputs alternated between two sizes 0.2% apart depending on the preceding
 job; 4K outputs at level 5.1 stayed byte-identical.
 
-## Four NVENC sessions on keyframe-aligned segments — measured 2026-10-04
+## Four NVENC sessions on keyframe-aligned segments: measured 2026-10-04
 
 The encoder bound above (one P5+fullres+UHQ session, ~38 fps) is per *session*; the card
 has four NVENC engines. Inputs of 30 s or more are now cut at source keyframes into
@@ -533,7 +534,7 @@ on that episode was 10.0 GiB. The unsegmented muxer would have held the 8 GB bit
 top of that, and a Blu-ray film at 78 Mbps is ~70 GB. Below 30 s the unsegmented path is kept, because those fixed costs are not
 earned back.
 
-## Why four sessions give ~2x, and what does not fix it — measured 2026-10-04 (evening)
+## Why four sessions give ~2x, and what does not fix it: measured 2026-10-04 (evening)
 
 Modal workspace `tinof`. Every run except two was on a 580.95.05 host; the two 610.57.04
 runs are marked. Probe: `scripts/probe_parallel_encode.py`, one case per single-use
@@ -603,7 +604,7 @@ The segmented prototype (`full:K:idr:30:clip10`), a 10-min progressive 1080p25 W
 
 | Sessions | cpu=6 | cpu=12 |
 |---|---|---|
-| 4 | 70.3 (610 host); 78.9-81.4 on 2026-10-04 morning | — |
+| 4 | 70.3 (610 host); 78.9-81.4 on 2026-10-04 morning | |
 | 6 | 76.1 | 80.0 |
 | 8 | 80.6 | 82.9 |
 
@@ -629,7 +630,7 @@ Within an affected container, every attempt failed. The 2026-10-04 morning pictu
 the next attempt almost always succeeds") does not hold for every container. Production
 falls back to no level after six attempts. Investigate this before raising the session count.
 
-## TrueHDR (SDR to HDR10) and nvidia-vfx 0.2.0.0 — measured 2026-10-04
+## TrueHDR (SDR to HDR10) and nvidia-vfx 0.2.0.0: measured 2026-10-04
 
 `scripts/probe_truehdr.py` and a bench deploy (`rtx-bench-hdr`, one container) on the
 61 s BBC Blu-ray sample and a 273-frame progressive 1080p25 clip, 1080p to 4K,
@@ -702,7 +703,7 @@ with identical channel means at every size.
   - 10-bit VSR output differs from the 8-bit path by 3 codes (0.3%) on average.
   - DENOISE/DEBLUR in RGB10A2 return alpha 0. VSR ignores it, and the code restores 3 anyway.
 
-## Driver 620 hosts, a full HDR episode, Matroska output and strength — measured 2026-11-25
+## Driver 620 hosts, a full HDR episode, Matroska output and strength: measured 2026-11-25
 
 RTX-PRO-6000, image unchanged since 2026-10-12 (NGX library from 580.95.05) until the
 Matroska change the same day. Every container that day ran on a **610.57.04** or a
@@ -777,7 +778,7 @@ Mean absolute Laplacian of the 4K output (the `BICUBIC` mode gives 1.01):
 | Mode | 1.0 | 0.5 | 0.0 |
 |---|---|---|---|
 | `ULTRA` | 2.98 | 1.78 | 1.24 |
-| `HIGHBITRATE_ULTRA` | 2.40 | 1.68 | — |
+| `HIGHBITRATE_ULTRA` | 2.40 | 1.68 | |
 | `HIGHBITRATE_ULTRA` after `DENOISE_MEDIUM` | 1.59 | 1.86 | 2.40 (no preprocess) |
 | `HIGHBITRATE_ULTRA` after `DEBLUR_ULTRA` | 3.48 | 2.52 | 2.40 (no preprocess) |
 

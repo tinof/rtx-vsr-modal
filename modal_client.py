@@ -58,8 +58,8 @@ def _auth_headers() -> dict[str, str]:
 
 
 def run() -> None:
-    parser = argparse.ArgumentParser(description="Upload media to Modal RTX upscaler and save output locally.")
-    parser.add_argument("--endpoint", required=True, help="Modal endpoint URL, e.g. https://<user>--rtx-media-upscaler-api.modal.run")
+    parser = argparse.ArgumentParser(description="Upscale an image or video with the deployed RTX VSR service and save the result locally.")
+    parser.add_argument("--endpoint", required=True, help="Modal endpoint URL, e.g. https://<workspace>--rtx-media-upscaler-api.modal.run")
     parser.add_argument("--input", help="Path to local image or video file")
     parser.add_argument(
         "--call-id",
