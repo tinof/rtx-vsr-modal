@@ -256,7 +256,8 @@ the refactors those tests protect, then measurements and product work, then defe
   `insert_sei_before_irap_slice` (`:542`), `patch_cll_sei` (`:584`), `parse_hdr_settings`
   (`:407`), `_normalize_quality` (`:335`), `_hevc_level` (`:1019`).
 - [E2.1][owner] Decide whether to add pytest as a dev dependency (`[dependency-groups]` in
-  `pyproject.toml`). Gate: the decision recorded in this item.
+  `pyproject.toml`). When the owner declines, E2.2 and E2.3 leave the roadmap with the decision
+  in the log, and E2 closes. Gate: the decision recorded in this item.
 - [E2.2][desk][batch] Add `tests/test_helpers.py`: golden MDCV and CLL SEI bytes for the default
   settings, captured from the current `hdr10_sei_nals` output (CLAUDE.md section 6 says they equal
   libx265's), emulation prevention for min luminance 1,
