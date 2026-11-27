@@ -57,7 +57,7 @@ def _auth_headers() -> dict[str, str]:
     return {"Modal-Key": key, "Modal-Secret": secret}
 
 
-def run() -> None:  # noqa: PLR0915 -- E1.12
+def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Upscale an image or video with the deployed RTX VSR service and save the result locally.")
     parser.add_argument("--endpoint", required=True, help="Modal endpoint URL, e.g. https://<workspace>--rtx-media-upscaler-api.modal.run")
     parser.add_argument("--input", help="Path to local image or video file")
@@ -132,6 +132,11 @@ def run() -> None:  # noqa: PLR0915 -- E1.12
     )
     parser.add_argument("--timeout", type=int, default=3 * 3600, help="Max seconds to wait for the job to finish")
     parser.add_argument("--poll-interval", type=float, default=5.0, help="Seconds between result polls")
+    return parser
+
+
+def _parse_args() -> tuple[argparse.Namespace, Path]:
+    parser = _build_parser()
     args = parser.parse_args()
 
     if not args.input and not args.call_id:
@@ -139,46 +144,48 @@ def run() -> None:  # noqa: PLR0915 -- E1.12
     input_path = Path(args.input) if args.input else Path.cwd() / "output"
     if args.input and not args.call_id and not input_path.exists():
         raise FileNotFoundError(f"Input file not found: {input_path}")
+    return args, input_path
 
-    endpoint = args.endpoint.rstrip("/")
-    headers = _auth_headers()
 
-    if args.call_id:
-        call_id = args.call_id
-    else:
-        mime_type = mimetypes.guess_type(str(input_path))[0] or "application/octet-stream"
-        data = {
-            "resize_type": args.resize_type,
-            "scale": str(args.scale),
-            "width": str(args.width),
-            "height": str(args.height),
-            "keep_aspect_ratio": str(args.keep_aspect_ratio).lower(),
-            "quality": args.quality,
-            "preprocess": args.preprocess,
-            "truehdr": args.truehdr,
-            "master_display": args.master_display,
-            "max_cll": args.max_cll,
-            "container": args.container,
-            "strength": str(args.strength),
-            "preprocess_strength": str(args.preprocess_strength),
-        }
+def _submit(args: argparse.Namespace, input_path: Path, endpoint: str, headers: dict[str, str]) -> str:
+    """Upload the input with the job's form fields and return the call_id."""
+    mime_type = mimetypes.guess_type(str(input_path))[0] or "application/octet-stream"
+    data = {
+        "resize_type": args.resize_type,
+        "scale": str(args.scale),
+        "width": str(args.width),
+        "height": str(args.height),
+        "keep_aspect_ratio": str(args.keep_aspect_ratio).lower(),
+        "quality": args.quality,
+        "preprocess": args.preprocess,
+        "truehdr": args.truehdr,
+        "master_display": args.master_display,
+        "max_cll": args.max_cll,
+        "container": args.container,
+        "strength": str(args.strength),
+        "preprocess_strength": str(args.preprocess_strength),
+    }
 
-        with input_path.open("rb") as f:
-            files = {"file": (input_path.name, f, mime_type)}
-            submit = requests.post(
-                f"{endpoint}/upscale",
-                data=data,
-                files=files,
-                headers=headers,
-                timeout=args.timeout,
-            )
-        if submit.status_code >= 400:
-            _fail(submit, "Upload")
+    with input_path.open("rb") as f:
+        files = {"file": (input_path.name, f, mime_type)}
+        submit = requests.post(
+            f"{endpoint}/upscale",
+            data=data,
+            files=files,
+            headers=headers,
+            timeout=args.timeout,
+        )
+    if submit.status_code >= 400:
+        _fail(submit, "Upload")
 
-        call_id = submit.json()["call_id"]
-        print(f"Submitted job {call_id}; waiting for the GPU worker to finish...")
-        print(f"(If this client stops, resume with --call-id {call_id})")
+    call_id = submit.json()["call_id"]
+    print(f"Submitted job {call_id}; waiting for the GPU worker to finish...")
+    print(f"(If this client stops, resume with --call-id {call_id})")
+    return call_id
 
+
+def _poll(args: argparse.Namespace, endpoint: str, headers: dict[str, str], call_id: str) -> requests.Response:
+    """Wait for the job and return the first response that is not pending or transient."""
     deadline = time.monotonic() + args.timeout
     delay = args.poll_interval
     while True:
@@ -193,7 +200,7 @@ def run() -> None:  # noqa: PLR0915 -- E1.12
             print(f"Poll failed ({exc.__class__.__name__}); retrying.")
             response = None
         if response is not None and response.status_code not in {202, *TRANSIENT_STATUSES}:
-            break
+            return response
         if response is not None:
             transient = response.status_code in TRANSIENT_STATUSES
             response.close()
@@ -208,9 +215,9 @@ def run() -> None:  # noqa: PLR0915 -- E1.12
         delay = min(delay * 2, 60.0) if transient else args.poll_interval
         time.sleep(delay)
 
-    if response.status_code >= 400:
-        _fail(response, "Job")
 
+def _download(args: argparse.Namespace, input_path: Path, response: requests.Response) -> None:
+    """Stream the result to the output path, renaming it into place once complete."""
     output_path = Path(args.output) if args.output else _default_output_path(input_path, response)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -235,6 +242,24 @@ def run() -> None:  # noqa: PLR0915 -- E1.12
     part_path.replace(output_path)
 
     print(f"Saved upscaled output to: {output_path}")
+
+
+def run() -> None:
+    args, input_path = _parse_args()
+
+    endpoint = args.endpoint.rstrip("/")
+    headers = _auth_headers()
+
+    if args.call_id:
+        call_id = args.call_id
+    else:
+        call_id = _submit(args, input_path, endpoint, headers)
+
+    response = _poll(args, endpoint, headers, call_id)
+    if response.status_code >= 400:
+        _fail(response, "Job")
+
+    _download(args, input_path, response)
 
 if __name__ == "__main__":
     run()
