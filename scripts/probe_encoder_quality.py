@@ -58,7 +58,7 @@ for cq in ("18", "24"):
 
 @app.function(gpu="RTX-PRO-6000", cpu=6, memory=32768, timeout=1800,
               volumes={"/jobs": vol}, single_use_containers=True)
-def encode(label: str) -> tuple[str, bytes, float]:
+def encode(label: str) -> tuple[str, bytes, float]:  # noqa: PLR0915 -- E1.14
     import os
     import time
 

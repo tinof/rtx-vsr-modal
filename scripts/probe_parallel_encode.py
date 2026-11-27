@@ -111,7 +111,7 @@ STREAM_MODES = ("s1", "s2", "s3", "s4", "s1v", "s1e", "s1d", "s1L", "s0", "sb1",
 HELD_MODES = ("s1", "s1v", "s1e", "s1d", "s1L", "s0")
 
 
-def _run_case(name: str) -> str:
+def _run_case(name: str) -> str:  # noqa: PLR0915 -- E1.5
     import contextlib
     import hashlib
     import os

@@ -15,3 +15,6 @@ dependencies = [
 
 [project.urls]
 Repository = "https://github.com/tinof/rtx-vsr-modal"
+
+[tool.ruff.lint.pylint]
+max-statements = 50

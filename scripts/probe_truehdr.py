@@ -99,7 +99,7 @@ def _helper_source() -> dict:
 
 @app.function(gpu="RTX-PRO-6000", cpu=6, memory=32768, timeout=1800,
               volumes={"/jobs": vol}, single_use_containers=True)
-def case(name: str, ctx: dict) -> str:
+def case(name: str, ctx: dict) -> str:  # noqa: PLR0915 -- E1.6
     import hashlib
     import json
     import subprocess
