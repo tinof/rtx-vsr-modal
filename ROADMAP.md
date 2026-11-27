@@ -61,6 +61,10 @@ same item stay startable. `/ship:roadmap-next` reads this list; remove an entry 
 - **F1.1, F1.2, F3.1: paid GPU measurement runs.** Each needs a bench deploy and Modal credit.
 - **F6.1: acceptance gate not stated.** Whether MaxFALL should leave out letterbox bars.
 - **F7.1: acceptance gate not stated.** Whether to support truly interlaced 50i/60i sources.
+- **E1.2: two contract lines that describe the lint.** `.claude/workflow.md` Testing rules ("`gate`
+  checks syntax and undefined names only") and Notes ("ruff F,E9 and the lock check") miss
+  `PLR0915`, which CI runs since E1.1. Options: add both lines to E1.2's text; leave them.
+  Recommended: add them to E1.2, because E1.2 already edits that file's `gate`.
 
 ## Priorities
 
@@ -180,22 +184,13 @@ the refactors those tests protect, then measurements and product work, then defe
 
 ### E1: Code size
 
-- **Status:** Open; `modal_app.py` (3,326 lines) and `scripts/probe_parallel_encode.py` (914) are
-  over 800 lines, 13 functions are over 50 statements, and CLAUDE.md is 51,486 bytes (budget 24,000).
-- Ruff `PLR0915` is not selected in CI or `gate`, and Ruff's CLI `--select` overrides any
-  `pyproject.toml` selection, so the command itself must change. A `modal_app.py` split is not a pure
+- **Status:** Open; CI lints functions over 50 statements since E1.1 (log). `modal_app.py` (3,326
+  lines) and `scripts/probe_parallel_encode.py` (914) are over 800 lines, the 13 functions over 50
+  statements carry step markers, and CLAUDE.md is 51,486 bytes (budget 24,000).
+- CI selects Ruff `PLR0915` since E1.1; `gate` does not until E1.2. Ruff's CLI `--select` overrides
+  any `pyproject.toml` selection, so the command itself must change. A `modal_app.py` split is not a pure
   move: new modules need `add_local_python_source` in both images, and `scripts/probe_truehdr.py`
   reads `modal_app.py`'s sources through `inspect`. AGENTS.md is a symlink to CLAUDE.md.
-- [E1.1][desk][batch] Turn on Ruff `PLR0915`: `[tool.ruff.lint.pylint] max-statements = 50` in
-  `pyproject.toml`, `uvx ruff check --select F,E9,PLR0915 .` in `.github/workflows/ci.yml`, and mark the current
-  violations with `# noqa: PLR0915 -- <step ID>` on their `def` lines: `modal_app.py`
-  `_upscale_video_segmented` and its nested `worker` (E1.7), `_upscale_video_gpu` (E1.8),
-  `_upscale_video` (E1.10), `api` (E1.13), `parse_hdr_settings` (E1.15); `modal_client.py` `run`
-  (E1.12); `scripts/probe_parallel_encode.py` `_run_case` (E1.5), `scripts/probe_truehdr.py` `case`
-  (E1.6), `scripts/probe_stages.py` `case` (E1.9), `scripts/probe_p010_encode.py` `encode_once`
-  (E1.11), `scripts/probe_encoder_quality.py` `encode` (E1.14), `scripts/probe_nvdec.py` `probe`
-  (E1.15). Gate: `uvx ruff check --select F,E9,PLR0915 .`
-  green, and a 51-statement probe function in `modal_app.py` makes it fail.
 - [E1.2][desk] Follow the lint in the agent files: `gate` in `.claude/workflow.md` to
   `uvx ruff check --select F,E9,PLR0915 . && uv lock --check`, its `python` size bullet to `function 50 by ruff PLR0915`, and CLAUDE.md
   "Verification protocol" step 1 to `uvx ruff check --select F,E9,PLR0915 .`. Gate: the new `gate` green and
