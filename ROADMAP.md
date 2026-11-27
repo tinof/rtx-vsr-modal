@@ -184,9 +184,9 @@ the refactors those tests protect, then measurements and product work, then defe
 
 ### E1: Code size
 
-- **Status:** Open; CI lints functions over 50 statements since E1.1 (log). `modal_app.py` (3,326
-  lines) and `scripts/probe_parallel_encode.py` (914) are over 800 lines, the 13 functions over 50
-  statements carry step markers, and CLAUDE.md is 51,486 bytes (budget 24,000).
+- **Status:** Open; CI lints functions over 50 statements since E1.1, and E1.12 split the client's
+  `run` (log). `modal_app.py` (3,326 lines) and `scripts/probe_parallel_encode.py` (914) are over 800
+  lines, the 12 functions over 50 statements carry step markers, and CLAUDE.md is 51,486 bytes.
 - CI selects Ruff `PLR0915` since E1.1; `gate` does not until E1.2. Ruff's CLI `--select` overrides
   any `pyproject.toml` selection, so the command itself must change. A `modal_app.py` split is not a pure
   move: new modules need `add_local_python_source` in both images, and `scripts/probe_truehdr.py`
@@ -217,9 +217,6 @@ the refactors those tests protect, then measurements and product work, then defe
   Gate: `gate` with its marker removed. Needs: E1.3.
 - [E1.11][desk] Split `encode_once` in `scripts/probe_p010_encode.py` (99 statements) by
   phase. Gate: `gate` with its marker removed. Needs: E1.1.
-- [E1.12][desk][batch] Split `run` in `modal_client.py` (76 statements) by phase (argument
-  handling, submit, poll, download). Gate: `gate` with its marker removed, and
-  `.venv/bin/python modal_client.py --help` prints the same text as on `origin/main`. Needs: E1.1.
 - [E1.13][desk] Split `api` (65 statements) in the module E1.3 gives it, one function per route.
   Gate: `gate` with its marker removed. Needs: E1.3.
 - [E1.14][desk] Split `encode` in `scripts/probe_encoder_quality.py` (62 statements) by

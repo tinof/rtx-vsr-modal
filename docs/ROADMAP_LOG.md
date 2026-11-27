@@ -4,6 +4,24 @@ Closed steps and items of [`ROADMAP.md`](../ROADMAP.md), newest first. Each clos
 as `## <date>: <ID> <title> (PR #<n>)`, with its full text and the gate evidence. IDs listed here are
 never reused.
 
+## 2026-11-27: E1.12 Split `run` in `modal_client.py` (PR #12)
+
+- [E1.12][desk][batch] Split `run` in `modal_client.py` (76 statements) by phase (argument
+  handling, submit, poll, download). Gate: `gate` with its marker removed, and
+  `.venv/bin/python modal_client.py --help` prints the same text as on `origin/main`. Needs: E1.1.
+
+- **Evidence:** on PR #12's head, `uvx ruff check --select F,E9,PLR0915 . && uv lock --check`
+  passed with the marker removed, and CI passed (`check`, GitGuardian). `modal_client.py --help`
+  printed the same 58 lines from the main and branch files, both run under the same file name.
+  An uncommitted harness with `requests`, `time.sleep` and `time.monotonic` stubbed ran 11 cases
+  (submit, resume, upload and job errors, poll retries, deadline, truncated download, argument
+  errors) against both files: output, HTTP calls, exits and written files were equal in all 11.
+- **Review:** CodeRabbit CLI 0.9.7 (deep requested), LGTM with no findings, Tier 1. Built by an
+  Opus builder in `/ship:roadmap-batch`, routed mode.
+- **Resolution:** `run()` calls `_build_parser`, `_parse_args`, `_submit`, `_poll` and `_download`
+  in the original order; the largest has 20 statements by ruff's count. The real round-trip through
+  the client is E1.18.
+
 ## 2026-11-27: E1.1 Turn on Ruff PLR0915 (PR #10)
 
 - [E1.1][desk][batch] Turn on Ruff `PLR0915`: `[tool.ruff.lint.pylint] max-statements = 50` in
