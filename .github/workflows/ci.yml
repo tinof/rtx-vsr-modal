@@ -13,7 +13,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v6
+      - uses: astral-sh/setup-uv@v7
       # Syntax errors, undefined names and functions over 50 statements only.
       # The GPU code cannot run in CI; see "Verification protocol" in CLAUDE.md
       # for what counts as verified.
