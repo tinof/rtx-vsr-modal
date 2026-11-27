@@ -404,7 +404,7 @@ class HdrSettings:
         )
 
 
-def parse_hdr_settings(truehdr: str | None, master_display: str | None = None,
+def parse_hdr_settings(truehdr: str | None, master_display: str | None = None,  # noqa: PLR0915 -- E1.15
                        max_cll: str | None = None) -> HdrSettings | None:
     """Validate the HDR form fields without importing nvvfx (the web tier has no GPU image).
 
@@ -2153,7 +2153,7 @@ class UpscaleWorker:
         Image.fromarray(output_rgb).save(output_dir / output_name, format="PNG")
         return output_name, "image/png"
 
-    def _upscale_video_gpu(
+    def _upscale_video_gpu(  # noqa: PLR0915 -- E1.8
         self,
         input_path: Path,
         output_dir: Path,
@@ -2498,7 +2498,7 @@ class UpscaleWorker:
         )
         return output_name, OUTPUT_CONTAINERS[container]
 
-    def _upscale_video_segmented(
+    def _upscale_video_segmented(  # noqa: PLR0915 -- E1.7
         self,
         input_path: Path,
         output_dir: Path,
@@ -2581,7 +2581,7 @@ class UpscaleWorker:
         sei_counts = [0] * sessions  # SEIs inserted per slot, for patch_cll_sei
         stage_lock = threading.Lock()
 
-        def worker(slot: int) -> None:
+        def worker(slot: int) -> None:  # noqa: PLR0915 -- E1.7
             decode_wait = infer_seconds = encode_seconds = 0.0
             decoders: list[_SegmentDecoder] = []
             try:
@@ -2810,7 +2810,7 @@ class UpscaleWorker:
         )
         return output_name, OUTPUT_CONTAINERS[container]
 
-    def _upscale_video(
+    def _upscale_video(  # noqa: PLR0915 -- E1.10
         self,
         input_path: Path,
         output_dir: Path,
@@ -3150,7 +3150,7 @@ class UpscaleWorker:
 )
 @modal.asgi_app(requires_proxy_auth=True)
 @modal.concurrent(max_inputs=20)
-def api():
+def api():  # noqa: PLR0915 -- E1.13
     from urllib.parse import quote
 
     from fastapi import BackgroundTasks, FastAPI, File, Form, HTTPException, UploadFile

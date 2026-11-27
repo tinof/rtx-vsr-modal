@@ -50,7 +50,7 @@ ENC = {
 
 @app.function(gpu="RTX-PRO-6000", cpu=6, memory=24576, timeout=1800,
               volumes={"/jobs": vol}, single_use_containers=True)
-def case(name: str, enc_key: str | None) -> str:
+def case(name: str, enc_key: str | None) -> str:  # noqa: PLR0915 -- E1.9
     import queue
     import statistics
     import threading

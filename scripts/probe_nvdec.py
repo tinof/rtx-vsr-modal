@@ -25,7 +25,7 @@ app = modal.App("rtx-probe-nvdec", image=image)
 
 
 @app.function(gpu="RTX-PRO-6000", timeout=1800)
-def probe() -> None:
+def probe() -> None:  # noqa: PLR0915 -- E1.15
     import subprocess
 
     import PyNvVideoCodec as nvc

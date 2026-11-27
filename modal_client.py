@@ -57,7 +57,7 @@ def _auth_headers() -> dict[str, str]:
     return {"Modal-Key": key, "Modal-Secret": secret}
 
 
-def run() -> None:
+def run() -> None:  # noqa: PLR0915 -- E1.12
     parser = argparse.ArgumentParser(description="Upscale an image or video with the deployed RTX VSR service and save the result locally.")
     parser.add_argument("--endpoint", required=True, help="Modal endpoint URL, e.g. https://<workspace>--rtx-media-upscaler-api.modal.run")
     parser.add_argument("--input", help="Path to local image or video file")

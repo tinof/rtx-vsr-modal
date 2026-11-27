@@ -76,7 +76,7 @@ def _brightness(index: int) -> float:
 
 
 @app.function(gpu="RTX-PRO-6000", timeout=1800, max_inputs=1)
-def encode_once(item: tuple[str, str, str, int]) -> dict:
+def encode_once(item: tuple[str, str, str, int]) -> dict:  # noqa: PLR0915 -- E1.11
     import subprocess
     import tempfile
     import time
